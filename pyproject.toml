@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yenta"
+version = "0.1.0"
+description = "Spec-driven MCP testing and auditing framework"
+authors = [
+  { name = "thebnbrkr", email = "you@example.com" }
+]
+license = { text = "Apache-2.0" }
+readme = "README.md"
+requires-python = ">=3.9"
+
+dependencies = [
+  "pydantic>=2.0",
+  "pyyaml",
+  "opentelemetry-api",
+  "opentelemetry-sdk",
+  "agora @ git+https://github.com/JerzyKultura/Agora.git"
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
