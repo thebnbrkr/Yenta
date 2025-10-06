@@ -1,11 +1,19 @@
-import json, yaml, subprocess, time
+import json, yaml, subprocess, time, asyncio
 from pathlib import Path
 from typing import Any, Dict, List
 from pydantic import ValidationError
 
 # Import telemetry base classes from Agora
-from agora.telemetry import AuditedNode, AuditedBatchNode
+from agora.telemetry import AuditedNode, AuditedAsyncBatchNode
 from .schemas import SCHEMA_REGISTRY
+
+# Try to import FastMCP client
+try:
+    from fastmcp import Client
+    FASTMCP_AVAILABLE = True
+except ImportError:
+    FASTMCP_AVAILABLE = False
+    Client = None
 
 
 class LoadSpecNode(AuditedNode):
@@ -29,10 +37,10 @@ class LoadSpecNode(AuditedNode):
         return "run_tests"
 
 
-class RunMCPTestsNode(AuditedBatchNode):
-    """Run all tests against one or more MCP servers"""
+class RunMCPTestsNode(AuditedAsyncBatchNode):
+    """Run all tests against one or more MCP servers using FastMCP Client"""
 
-    def prep(self, shared):
+    def prep_async(self, shared):
         spec = shared["spec"]
         tests: List[Dict[str, Any]] = spec.get("custom_tests", [])
 
@@ -46,41 +54,42 @@ class RunMCPTestsNode(AuditedBatchNode):
         # Cartesian product [(server, test)]
         return [{"server_path": s, "test": t} for s in servers for t in tests]
 
-    def _call_mcp(self, server_path: str, tool_name: str, arguments: Dict[str, Any], timeout_sec: int = 45):
-        req = json.dumps({"tool": tool_name, "arguments": arguments})
+    async def _call_mcp_fastmcp(self, server_path: str, tool_name: str, arguments: Dict[str, Any], timeout_sec: int = 45):
+        """Call MCP tool using FastMCP Client"""
+        if not FASTMCP_AVAILABLE:
+            return {"error": "FastMCP not installed. Run: pip install fastmcp"}, 0
+        
         start = time.time()
         try:
-            proc = subprocess.Popen(
-                ["python", server_path],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            stdout, stderr = proc.communicate(input=req + "\n", timeout=timeout_sec)
-            latency_ms = (time.time() - start) * 1000.0
-
-            if stderr:
-                return {"error": stderr.strip()}, latency_ms
-
-            try:
-                data = json.loads(stdout.strip())
-            except Exception as e:
-                return {"error": f"Malformed JSON: {e}\nRAW: {stdout[:200]}..."}, latency_ms
-
-            return data, latency_ms
-        except subprocess.TimeoutExpired:
+            async with Client(server_path) as client:
+                result = await asyncio.wait_for(
+                    client.call_tool(tool_name, arguments),
+                    timeout=timeout_sec
+                )
+                latency_ms = (time.time() - start) * 1000.0
+                
+                # Extract text content from MCP response
+                if hasattr(result, 'content') and result.content:
+                    content = result.content[0]
+                    if hasattr(content, 'text'):
+                        return {"result": content.text}, latency_ms
+                    else:
+                        return {"result": str(content)}, latency_ms
+                
+                return {"result": str(result)}, latency_ms
+                
+        except asyncio.TimeoutError:
             return {"error": f"Timeout after {timeout_sec}s"}, (time.time() - start) * 1000.0
         except Exception as e:
-            return {"error": str(e)}, (time.time() - start) * 1000.0
+            return {"error": f"{type(e).__name__}: {str(e)}"}, (time.time() - start) * 1000.0
 
-    def exec(self, pair):
+    async def exec_async(self, pair):
         server_path, test_case = pair["server_path"], pair["test"]
         name, tool, args = test_case["name"], test_case["tool"], test_case.get("arguments", {})
         timeout = int(test_case.get("timeout_sec", 45))
 
         print(f"  Running [{Path(server_path).name}] :: {name} ...")
-        resp, latency_ms = self._call_mcp(server_path, tool, args, timeout)
+        resp, latency_ms = await self._call_mcp_fastmcp(server_path, tool, args, timeout)
 
         status = "PASS" if "error" not in resp else "FAIL"
         failures, details = [], {"latency_ms": round(latency_ms, 2)}
@@ -124,7 +133,7 @@ class RunMCPTestsNode(AuditedBatchNode):
             "expected": {"schema": schema_name, "keywords": keywords, "metrics": metrics},
         }
 
-    def post(self, shared, _, results):
+    async def post_async(self, shared, _, results):
         shared["results"] = results
         total, passed = len(results), sum(1 for r in results if r["status"] == "PASS")
         print(f"\n  Completed: {passed}/{total} tests passed\n")
@@ -134,7 +143,8 @@ class RunMCPTestsNode(AuditedBatchNode):
 class GenerateReportNode(AuditedNode):
     """Pretty + JSON reports"""
 
-    def prep(self, shared): return shared["results"]
+    def prep(self, shared): 
+        return shared["results"]
 
     def exec(self, results):
         servers = sorted(set(r["server"] for r in results))
