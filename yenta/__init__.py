@@ -1,4 +1,4 @@
-import json, yaml, subprocess, time, asyncio
+import json, yaml, time, asyncio
 from pathlib import Path
 from typing import Any, Dict, List
 from pydantic import ValidationError
@@ -51,50 +51,58 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         else:
             raise ValueError("spec must include mcp_server or mcp_servers")
 
-        # Cartesian product [(server, test)]
         return [{"server_path": s, "test": t} for s in servers for t in tests]
 
-    async def _call_mcp_fastmcp(self, server_path: str, tool_name: str, arguments: Dict[str, Any], timeout_sec: int = 45):
-        """Call MCP tool using FastMCP Client"""
-        if not FASTMCP_AVAILABLE:
-            return {"error": "FastMCP not installed. Run: pip install fastmcp"}, 0
-        
-        start = time.time()
-        try:
-            async with Client(server_path) as client:
-                result = await asyncio.wait_for(
-                    client.call_tool(tool_name, arguments),
-                    timeout=timeout_sec
-                )
-                latency_ms = (time.time() - start) * 1000.0
-                
-                # Extract text content from MCP response
-                if hasattr(result, 'content') and result.content:
-                    content = result.content[0]
-                    if hasattr(content, 'text'):
-                        return {"result": content.text}, latency_ms
-                    else:
-                        return {"result": str(content)}, latency_ms
-                
-                return {"result": str(result)}, latency_ms
-                
-        except asyncio.TimeoutError:
-            return {"error": f"Timeout after {timeout_sec}s"}, (time.time() - start) * 1000.0
-        except Exception as e:
-            return {"error": f"{type(e).__name__}: {str(e)}"}, (time.time() - start) * 1000.0
-
     async def exec_async(self, pair):
+        """Execute a single test case using FastMCP Client"""
+        if not FASTMCP_AVAILABLE:
+            return {
+                "server": pair["server_path"],
+                "test_name": pair["test"]["name"],
+                "tool": pair["test"]["tool"],
+                "arguments": pair["test"].get("arguments", {}),
+                "status": "FAIL",
+                "response": {"error": "FastMCP not installed"},
+                "failures": ["pip install fastmcp"],
+                "metrics": {"latency_ms": 0},
+                "expected": {},
+            }
+
         server_path, test_case = pair["server_path"], pair["test"]
         name, tool, args = test_case["name"], test_case["tool"], test_case.get("arguments", {})
         timeout = int(test_case.get("timeout_sec", 45))
 
         print(f"  Running [{Path(server_path).name}] :: {name} ...")
-        resp, latency_ms = await self._call_mcp_fastmcp(server_path, tool, args, timeout)
+        
+        # Call MCP tool using FastMCP Client
+        start = time.time()
+        try:
+            async with Client(server_path) as client:
+                result = await asyncio.wait_for(
+                    client.call_tool(tool, args),
+                    timeout=timeout
+                )
+                latency_ms = (time.time() - start) * 1000.0
+                
+                # Extract text from MCP response
+                if hasattr(result, 'content') and result.content:
+                    content = result.content[0]
+                    resp = {"result": content.text if hasattr(content, 'text') else str(content)}
+                else:
+                    resp = {"result": str(result)}
+                    
+        except asyncio.TimeoutError:
+            latency_ms = (time.time() - start) * 1000.0
+            resp = {"error": f"Timeout after {timeout}s"}
+        except Exception as e:
+            latency_ms = (time.time() - start) * 1000.0
+            resp = {"error": f"{type(e).__name__}: {str(e)}"}
 
+        # Validate response
         status = "PASS" if "error" not in resp else "FAIL"
         failures, details = [], {"latency_ms": round(latency_ms, 2)}
 
-        # schema validation
+        # Schema validation
         schema_name = test_case.get("expected_schema")
         if status == "PASS" and schema_name:
             model = SCHEMA_REGISTRY.get(schema_name)
@@ -106,7 +114,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                 except ValidationError as e:
                     status, failures = "FAIL", [f"Schema validation failed: {e}"]
 
-        # keyword checks
+        # Keyword checks
         keywords = test_case.get("expected_keywords", [])
         if status == "PASS" and keywords:
             jam = json.dumps(resp, ensure_ascii=False)
@@ -114,7 +122,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
             if missing:
                 status, failures = "FAIL", [f"Missing keywords: {missing}"]
 
-        # metric assertions
+        # Latency assertions
         metrics = test_case.get("expected_metrics", {})
         max_latency = metrics.get("max_latency_ms")
         if status == "PASS" and isinstance(max_latency, (int, float)):
