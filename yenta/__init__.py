@@ -4,7 +4,7 @@ from typing import Any, Dict, List
 from pydantic import ValidationError
 
 # Import telemetry base classes from Agora
-from agora.telemetry import AuditedNode, AuditedAsyncBatchNode
+from agora.telemetry import AuditedAsyncNode, AuditedAsyncBatchNode
 from .schemas import SCHEMA_REGISTRY
 
 # Try to import FastMCP client
@@ -16,17 +16,17 @@ except ImportError:
     Client = None
 
 
-class LoadSpecNode(AuditedNode):
+class LoadSpecNode(AuditedAsyncNode):
     """Load spec YAML and place in shared dict"""
 
-    def prep(self, shared):
+    async def prep_async(self, shared):
         return shared["spec_file"]
 
-    def exec(self, spec_file):
+    async def exec_async(self, spec_file):
         with open(spec_file) as f:
             return yaml.safe_load(f)
 
-    def post(self, shared, _, spec_dict):
+    async def post_async(self, shared, _, spec_dict):
         shared["spec"] = spec_dict
         agent = spec_dict.get("agent_name", "<unnamed>")
         tools = spec_dict.get("tools", [])
@@ -40,7 +40,7 @@ class LoadSpecNode(AuditedNode):
 class RunMCPTestsNode(AuditedAsyncBatchNode):
     """Run all tests against one or more MCP servers using FastMCP Client"""
 
-    def prep_async(self, shared):
+    async def prep_async(self, shared):
         spec = shared["spec"]
         tests: List[Dict[str, Any]] = spec.get("custom_tests", [])
 
@@ -140,13 +140,13 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         return "report"
 
 
-class GenerateReportNode(AuditedNode):
+class GenerateReportNode(AuditedAsyncNode):
     """Pretty + JSON reports"""
 
-    def prep(self, shared): 
+    async def prep_async(self, shared): 
         return shared["results"]
 
-    def exec(self, results):
+    async def exec_async(self, results):
         servers = sorted(set(r["server"] for r in results))
         by_server = {s: [r for r in results if r["server"] == s] for s in servers}
 
@@ -170,7 +170,7 @@ class GenerateReportNode(AuditedNode):
 
         return "\n".join(lines)
 
-    def post(self, shared, _, report):
+    async def post_async(self, shared, _, report):
         print(report)
         shared["report"] = report
         return "complete"
