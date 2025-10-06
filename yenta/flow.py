@@ -1,8 +1,8 @@
-from agora.telemetry import AuditedFlow, AuditLogger
+from agora.telemetry import AuditedAsyncFlow, AuditLogger
 from yenta import LoadSpecNode, RunMCPTestsNode, GenerateReportNode
 
 
-class MCPTestFlow(AuditedFlow):
+class MCPTestFlow(AuditedAsyncFlow):
     """Tie nodes together into a full MCP test run"""
 
     def __init__(self, logger: AuditLogger):
