@@ -1,13 +1,10 @@
-import json, yaml, time, asyncio
+import json, time, asyncio
 from pathlib import Path
-from typing import Any, Dict, List
 from pydantic import ValidationError
-
-# Import telemetry base classes from Agora
-from agora.telemetry import AuditedAsyncNode, AuditedAsyncBatchNode
+from agora.telemetry import AuditedAsyncBatchNode
 from .schemas import SCHEMA_REGISTRY
+from .mocks import MockRegistry
 
-# Try to import FastMCP client
 try:
     from fastmcp import Client
     FASTMCP_AVAILABLE = True
@@ -38,11 +35,15 @@ class LoadSpecNode(AuditedAsyncNode):
 
 
 class RunMCPTestsNode(AuditedAsyncBatchNode):
-    """Run all tests against one or more MCP servers using FastMCP Client"""
+    """Run all tests against one or more MCP servers using FastMCP Client (with mocking support)"""
+
+    def __init__(self, name, audit_logger):
+        super().__init__(name, audit_logger)
+        self.mock_registry = MockRegistry()
 
     async def prep_async(self, shared):
         spec = shared["spec"]
-        tests: List[Dict[str, Any]] = spec.get("custom_tests", [])
+        tests = spec.get("custom_tests", [])
 
         if "mcp_servers" in spec:
             servers = spec["mcp_servers"]
@@ -51,56 +52,94 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         else:
             raise ValueError("spec must include mcp_server or mcp_servers")
 
+        # Pass global flags through shared state
+        shared["global_use_mocks"] = spec.get("use_mocks", False)
+        shared["global_record_mocks"] = spec.get("record_mocks", False)
+
         return [{"server_path": s, "test": t} for s in servers for t in tests]
 
     async def exec_async(self, pair):
-        """Execute a single test case using FastMCP Client"""
-        if not FASTMCP_AVAILABLE:
-            return {
-                "server": pair["server_path"],
-                "test_name": pair["test"]["name"],
-                "tool": pair["test"]["tool"],
-                "arguments": pair["test"].get("arguments", {}),
-                "status": "FAIL",
-                "response": {"error": "FastMCP not installed"},
-                "failures": ["pip install fastmcp"],
-                "metrics": {"latency_ms": 0},
-                "expected": {},
-            }
-
+        """Execute a single test case using FastMCP Client (or mocks)"""
         server_path, test_case = pair["server_path"], pair["test"]
         name, tool, args = test_case["name"], test_case["tool"], test_case.get("arguments", {})
         timeout = int(test_case.get("timeout_sec", 45))
 
-        print(f"  Running [{Path(server_path).name}] :: {name} ...")
+        # Determine if we should use mocks (per-test overrides global)
+        use_mocks = test_case.get("use_mocks", pair.get("global_use_mocks", False))
+        record_mocks = test_case.get("record_mocks", pair.get("global_record_mocks", False))
         
-        # Call MCP tool using FastMCP Client
+        mode = "real"  # Can be: mock, replay, recorded, real
+        
+        # --- MOCKING LOGIC ---
         start = time.time()
-        try:
-            async with Client(server_path) as client:
-                result = await asyncio.wait_for(
-                    client.call_tool(tool, args),
-                    timeout=timeout
-                )
-                latency_ms = (time.time() - start) * 1000.0
-                
-                # Extract text from MCP response
-                if hasattr(result, 'content') and result.content:
-                    content = result.content[0]
-                    resp = {"result": content.text if hasattr(content, 'text') else str(content)}
-                else:
-                    resp = {"result": str(result)}
-                    
-        except asyncio.TimeoutError:
-            latency_ms = (time.time() - start) * 1000.0
-            resp = {"error": f"Timeout after {timeout}s"}
-        except Exception as e:
-            latency_ms = (time.time() - start) * 1000.0
-            resp = {"error": f"{type(e).__name__}: {str(e)}"}
+        
+        # 1. Inline mock (highest priority)
+        if use_mocks and "mock" in test_case:
+            resp = test_case["mock"]
+            latency_ms = 0.0
+            mode = "mock"
+            print(f"  [mocked] {name} ...")
+        
+        # 2. Replay from registry
+        elif use_mocks and self.mock_registry.has_mock(tool, args):
+            resp = self.mock_registry.get(tool, args)
+            latency_ms = 0.0
+            mode = "replay"
+            print(f"  [replayed] {name} ...")
+        
+        # 3. Real MCP call
+        else:
+            if not FASTMCP_AVAILABLE:
+                return {
+                    "server": server_path,
+                    "test_name": name,
+                    "tool": tool,
+                    "arguments": args,
+                    "status": "FAIL",
+                    "response": {"error": "FastMCP not installed"},
+                    "failures": ["pip install fastmcp"],
+                    "metrics": {"latency_ms": 0},
+                    "mode": "error",
+                    "expected": {},
+                }
 
-        # Validate response
+            mode_label = "recorded" if record_mocks else "real"
+            print(f"  [{mode_label}] {name} ...")
+            
+            try:
+                async with Client(server_path) as client:
+                    result = await asyncio.wait_for(
+                        client.call_tool(tool, args),
+                        timeout=timeout
+                    )
+                    latency_ms = (time.time() - start) * 1000.0
+                    
+                    # Extract text from MCP response
+                    if hasattr(result, 'content') and result.content:
+                        content = result.content[0]
+                        resp = {"result": content.text if hasattr(content, 'text') else str(content)}
+                    else:
+                        resp = {"result": str(result)}
+                    
+                    mode = "recorded" if record_mocks else "real"
+                    
+                    # Record if requested
+                    if record_mocks:
+                        self.mock_registry.record(tool, args, resp)
+                        
+            except asyncio.TimeoutError:
+                latency_ms = (time.time() - start) * 1000.0
+                resp = {"error": f"Timeout after {timeout}s"}
+                mode = "error"
+            except Exception as e:
+                latency_ms = (time.time() - start) * 1000.0
+                resp = {"error": f"{type(e).__name__}: {str(e)}"}
+                mode = "error"
+
+        # --- VALIDATION LOGIC (same for mocks and real calls) ---
         status = "PASS" if "error" not in resp else "FAIL"
-        failures, details = [], {"latency_ms": round(latency_ms, 2)}
+        failures = []
+        details = {"latency_ms": round(latency_ms, 2)}
 
         # Schema validation
         schema_name = test_case.get("expected_schema")
@@ -114,11 +153,11 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                 except ValidationError as e:
                     status, failures = "FAIL", [f"Schema validation failed: {e}"]
 
-        # Keyword checks
+        # Keyword checks (CASE-INSENSITIVE)
         keywords = test_case.get("expected_keywords", [])
         if status == "PASS" and keywords:
-            jam = json.dumps(resp, ensure_ascii=False)
-            missing = [k for k in keywords if k not in jam]
+            jam = json.dumps(resp, ensure_ascii=False).lower()  # Convert to lowercase
+            missing = [k for k in keywords if k.lower() not in jam]  # Compare lowercase
             if missing:
                 status, failures = "FAIL", [f"Missing keywords: {missing}"]
 
@@ -130,7 +169,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                 status, failures = "FAIL", [f"Latency {latency_ms:.1f} > {max_latency}"]
 
         return {
-            "server": server_path,
+            "server": "mock" if mode in ["mock", "replay"] else server_path,
             "test_name": name,
             "tool": tool,
             "arguments": args,
@@ -138,6 +177,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
             "response": resp,
             "failures": failures,
             "metrics": details,
+            "mode": mode,  # NEW: Track whether this was mocked/replayed/recorded/real
             "expected": {"schema": schema_name, "keywords": keywords, "metrics": metrics},
         }
 
@@ -146,7 +186,6 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         total, passed = len(results), sum(1 for r in results if r["status"] == "PASS")
         print(f"\n  Completed: {passed}/{total} tests passed\n")
         return "report"
-
 
 class GenerateReportNode(AuditedAsyncNode):
     """Pretty + JSON reports"""
