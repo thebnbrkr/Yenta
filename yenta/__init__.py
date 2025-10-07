@@ -4,6 +4,7 @@ from pydantic import ValidationError
 from agora.telemetry import AuditedAsyncBatchNode
 from .schemas import SCHEMA_REGISTRY
 from .mocks import MockRegistry
+from agora.telemetry import AuditedAsyncNode
 
 try:
     from fastmcp import Client
@@ -188,7 +189,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         return "report"
 
 class GenerateReportNode(AuditedAsyncNode):
-    """Pretty + JSON reports"""
+    """Pretty + JSON reports (with mock/replay indicators)"""
 
     async def prep_async(self, shared): 
         return shared["results"]
@@ -204,7 +205,8 @@ class GenerateReportNode(AuditedAsyncNode):
             lines += [f"\nServer: {s}", f"Summary: {passed}/{total} passed"]
             for r in block:
                 icon = "✅" if r["status"] == "PASS" else "❌"
-                lines.append(f"\n{icon} {r['test_name']}  [{r['metrics'].get('latency_ms','?')} ms]")
+                mode_badge = f"[{r.get('mode', 'real')}]"  # NEW: Show mode
+                lines.append(f"\n{icon} {r['test_name']} {mode_badge}  [{r['metrics'].get('latency_ms','?')} ms]")
                 if r["failures"]:
                     for f in r["failures"]:
                         lines.append(f"   - {f}")
