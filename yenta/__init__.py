@@ -53,11 +53,17 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         else:
             raise ValueError("spec must include mcp_server or mcp_servers")
 
-        # Pass global flags through shared state
-        shared["global_use_mocks"] = spec.get("use_mocks", False)
-        shared["global_record_mocks"] = spec.get("record_mocks", False)
+        # Get global flags
+        global_use_mocks = spec.get("use_mocks", False)
+        global_record_mocks = spec.get("record_mocks", False)
 
-        return [{"server_path": s, "test": t} for s in servers for t in tests]
+        # Pass global flags WITH each test pair
+        return [{
+            "server_path": s, 
+            "test": t,
+            "global_use_mocks": global_use_mocks,
+            "global_record_mocks": global_record_mocks
+        } for s in servers for t in tests]
 
     async def exec_async(self, pair):
         """Execute a single test case using FastMCP Client (or mocks)"""
