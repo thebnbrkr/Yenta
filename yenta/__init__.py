@@ -1,10 +1,9 @@
-import json, time, asyncio
+import json, yaml, time, asyncio  # ADD yaml HERE!
 from pathlib import Path
 from pydantic import ValidationError
-from agora.telemetry import AuditedAsyncBatchNode
+from agora.telemetry import AuditedAsyncNode, AuditedAsyncBatchNode
 from .schemas import SCHEMA_REGISTRY
 from .mocks import MockRegistry
-from agora.telemetry import AuditedAsyncNode
 
 try:
     from fastmcp import Client
@@ -82,17 +81,17 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         
         # 1. Inline mock (highest priority)
         if use_mocks and "mock" in test_case:
+            print(f"  [mocked] {name} ...")
             resp = test_case["mock"]
             latency_ms = 0.0
             mode = "mock"
-            print(f"  [mocked] {name} ...")
         
         # 2. Replay from registry
         elif use_mocks and self.mock_registry.has_mock(tool, args):
+            print(f"  [replayed] {name} ...")
             resp = self.mock_registry.get(tool, args)
             latency_ms = 0.0
             mode = "replay"
-            print(f"  [replayed] {name} ...")
         
         # 3. Real MCP call
         else:
@@ -111,7 +110,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                 }
 
             mode_label = "recorded" if record_mocks else "real"
-            print(f"  [{mode_label}] {name} ...")
+            print(f"  [{mode_label}] Running [{Path(server_path).name}] :: {name} ...")
             
             try:
                 async with Client(server_path) as client:
@@ -193,6 +192,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         total, passed = len(results), sum(1 for r in results if r["status"] == "PASS")
         print(f"\n  Completed: {passed}/{total} tests passed\n")
         return "report"
+
 
 class GenerateReportNode(AuditedAsyncNode):
     """Pretty + JSON reports (with mock/replay indicators)"""
