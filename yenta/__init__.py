@@ -1,9 +1,10 @@
-import json, yaml, time, asyncio  # ADD yaml HERE!
+import json, yaml, time, asyncio
 from pathlib import Path
 from pydantic import ValidationError
 from agora.telemetry import AuditedAsyncNode, AuditedAsyncBatchNode
 from .schemas import SCHEMA_REGISTRY
-from .mocks import MockRegistry
+from .registry import JsonRegistry as MockRegistry  # NEW: Use JsonRegistry
+from .models import TestRun, TestResult  # NEW: Import models
 
 try:
     from fastmcp import Client
@@ -25,6 +26,7 @@ class LoadSpecNode(AuditedAsyncNode):
 
     async def post_async(self, shared, _, spec_dict):
         shared["spec"] = spec_dict
+        shared["start_time"] = time.time()  # NEW: Track start time
         agent = spec_dict.get("agent_name", "<unnamed>")
         tools = spec_dict.get("tools", [])
         tests = spec_dict.get("custom_tests", [])
@@ -39,7 +41,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
 
     def __init__(self, name, audit_logger):
         super().__init__(name, audit_logger)
-        self.mock_registry = MockRegistry()
+        self.mock_registry = MockRegistry()  # Uses JsonRegistry
 
     async def prep_async(self, shared):
         spec = shared["spec"]
@@ -162,8 +164,8 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         # Keyword checks (CASE-INSENSITIVE)
         keywords = test_case.get("expected_keywords", [])
         if status == "PASS" and keywords:
-            jam = json.dumps(resp, ensure_ascii=False).lower()  # Convert to lowercase
-            missing = [k for k in keywords if k.lower() not in jam]  # Compare lowercase
+            jam = json.dumps(resp, ensure_ascii=False).lower()
+            missing = [k for k in keywords if k.lower() not in jam]
             if missing:
                 status, failures = "FAIL", [f"Missing keywords: {missing}"]
 
@@ -183,7 +185,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
             "response": resp,
             "failures": failures,
             "metrics": details,
-            "mode": mode,  # NEW: Track whether this was mocked/replayed/recorded/real
+            "mode": mode,
             "expected": {"schema": schema_name, "keywords": keywords, "metrics": metrics},
         }
 
@@ -191,6 +193,22 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         shared["results"] = results
         total, passed = len(results), sum(1 for r in results if r["status"] == "PASS")
         print(f"\n  Completed: {passed}/{total} tests passed\n")
+        
+        # NEW: Save run history
+        try:
+            duration_ms = (time.time() - shared.get("start_time", time.time())) * 1000
+            run = TestRun(
+                session_id=self.audit_logger.session_id,
+                spec_name=Path(shared["spec_file"]).name,
+                server=shared["spec"].get("mcp_server", shared["spec"].get("mcp_servers", ["unknown"])[0]),
+                status="completed",
+                duration_ms=duration_ms,
+                results=[TestResult(**r) for r in results]
+            )
+            self.mock_registry.save_run(run)
+        except Exception as e:
+            print(f"⚠️  Could not save run history: {e}")
+        
         return "report"
 
 
@@ -211,7 +229,7 @@ class GenerateReportNode(AuditedAsyncNode):
             lines += [f"\nServer: {s}", f"Summary: {passed}/{total} passed"]
             for r in block:
                 icon = "✅" if r["status"] == "PASS" else "❌"
-                mode_badge = f"[{r.get('mode', 'real')}]"  # NEW: Show mode
+                mode_badge = f"[{r.get('mode', 'real')}]"
                 lines.append(f"\n{icon} {r['test_name']} {mode_badge}  [{r['metrics'].get('latency_ms','?')} ms]")
                 if r["failures"]:
                     for f in r["failures"]:
