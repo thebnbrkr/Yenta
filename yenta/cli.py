@@ -10,7 +10,7 @@ from rich import print as rprint
 
 from agora.telemetry import AuditLogger
 from yenta.flow import MCPTestFlow
-from yenta.mocks import MockRegistry
+from yenta.registry import JsonRegistry
 
 app = typer.Typer(
     name="yenta",
@@ -97,7 +97,7 @@ def run(
     try:
         asyncio.run(_run_flow(spec_path, session_id, override))
         if record:
-            rprint(f"\n[green]✅ Recordings saved to mocks.json[/green]")
+            rprint(f"\n[green]✅ Recordings saved to data/mocks/[/green]")
     except Exception as e:
         rprint(f"[red]❌ Test run failed: {e}[/red]")
         raise typer.Exit(1)
@@ -122,7 +122,7 @@ def record(
     
     try:
         asyncio.run(_run_flow(spec_path, session_id, override))
-        rprint(f"\n[green]✅ Recordings saved to mocks.json[/green]")
+        rprint(f"\n[green]✅ Recordings saved to data/mocks/[/green]")
     except Exception as e:
         rprint(f"[red]❌ Recording failed: {e}[/red]")
         raise typer.Exit(1)
@@ -142,9 +142,10 @@ def replay(
         rprint(f"[red]❌ Spec file not found: {spec_file}[/red]")
         raise typer.Exit(1)
     
-    registry = MockRegistry()
-    if not registry.mock_file.exists():
-        rprint("[yellow]⚠️  No mocks.json found. Run 'yenta record' first.[/yellow]")
+    registry = JsonRegistry()
+    stats = registry.get_stats()
+    if stats["total_mocks"] == 0:
+        rprint("[yellow]⚠️  No mocks found. Run 'yenta record' first.[/yellow]")
     
     # Override: use_mocks=true, record_mocks=false
     override = {"use_mocks": True, "record_mocks": False}
@@ -158,62 +159,103 @@ def replay(
 
 @app.command()
 def status():
-    """📊 Show recording status and statistics"""
+    """📊 Show registry status"""
     
-    registry = MockRegistry()
+    registry = JsonRegistry()
+    stats = registry.get_stats()
     
-    table = Table(title="🎭 Yenta Mock Registry Status")
+    table = Table(title="🎭 Yenta Registry Status")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
     
-    if registry.mock_file.exists():
-        num_mocks = len(registry.mocks)
-        file_size = registry.mock_file.stat().st_size
-        
-        table.add_row("Mock File", str(registry.mock_file))
-        table.add_row("Total Recordings", str(num_mocks))
-        table.add_row("File Size", f"{file_size:,} bytes")
+    table.add_row("Data Directory", stats["data_dir"])
+    table.add_row("Total Mocks", str(stats["total_mocks"]))
+    table.add_row("  ├─ Tools", str(stats["tools"]))
+    table.add_row("  ├─ Resources", str(stats["resources"]))
+    table.add_row("  └─ Prompts", str(stats["prompts"]))
+    table.add_row("Total Runs", str(stats["total_runs"]))
+    
+    if stats["total_mocks"] > 0:
         table.add_row("Status", "✅ Ready for replay")
-        
-        if num_mocks > 0:
-            rprint("\n[bold]Recorded Tools:[/bold]")
-            tools = set()
-            for key in registry.mocks.keys():
-                import json
-                try:
-                    data = json.loads(key)
-                    tools.add(data.get("tool", "unknown"))
-                except:
-                    pass
-            for tool in sorted(tools):
-                rprint(f"  • {tool}")
     else:
-        table.add_row("Mock File", "❌ Not found")
         table.add_row("Status", "No recordings yet")
-        table.add_row("Next Step", "Run 'yenta record <spec.yaml>'")
+    
+    console.print(table)
+    
+    # Show recorded tools
+    if stats["total_mocks"] > 0:
+        rprint("\n[bold]Recorded Tools:[/bold]")
+        mocks = registry.list_mocks()
+        tools = set(m.name for m in mocks)
+        for tool in sorted(tools):
+            rprint(f"  • {tool}")
+
+
+@app.command()
+def history(
+    limit: int = typer.Option(10, "--limit", "-n", help="Number of runs to show")
+):
+    """📜 Show test run history"""
+    
+    registry = JsonRegistry()
+    runs = registry.list_runs(limit=limit)
+    
+    if not runs:
+        rprint("[yellow]No test runs found[/yellow]")
+        return
+    
+    table = Table(title=f"📜 Recent Test Runs (last {len(runs)})")
+    table.add_column("Timestamp", style="cyan")
+    table.add_column("Spec", style="green")
+    table.add_column("Status", style="yellow")
+    table.add_column("Duration", style="magenta")
+    table.add_column("Pass/Total", style="blue")
+    
+    for run in runs:
+        passed = sum(1 for r in run.results if r.status == "PASS")
+        total = len(run.results)
+        status_icon = "✅" if run.status == "completed" else "❌"
+        
+        table.add_row(
+            run.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
+            run.spec_name,
+            f"{status_icon} {run.status}",
+            f"{run.duration_ms:.0f}ms",
+            f"{passed}/{total}"
+        )
     
     console.print(table)
 
 
 @app.command()
 def clear(
+    category: Optional[str] = typer.Option(None, "--category", "-c", help="Clear specific category (tools/resources/prompts)"),
     confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ):
-    """🧹 Clear all recorded mocks"""
+    """🧹 Clear recorded mocks"""
     
-    registry = MockRegistry()
+    registry = JsonRegistry()
+    stats = registry.get_stats()
     
-    if not registry.mock_file.exists():
-        rprint("[yellow]ℹ️  No mocks.json file found. Nothing to clear.[/yellow]")
+    if stats["total_mocks"] == 0:
+        rprint("[yellow]ℹ️  No mocks found. Nothing to clear.[/yellow]")
         return
     
-    if not confirm:
-        num_mocks = len(registry.mocks)
-        rprint(f"⚠️  This will delete [bold]{num_mocks}[/bold] recorded mock(s).")
-        confirm = typer.confirm("Are you sure?")
+    if category:
+        count = stats.get(category, 0)
+        if count == 0:
+            rprint(f"[yellow]ℹ️  No {category} mocks found.[/yellow]")
+            return
+        if not confirm:
+            rprint(f"⚠️  This will delete [bold]{count}[/bold] {category} mock(s).")
+            confirm = typer.confirm("Are you sure?")
+    else:
+        if not confirm:
+            rprint(f"⚠️  This will delete [bold]{stats['total_mocks']}[/bold] total mock(s).")
+            confirm = typer.confirm("Are you sure?")
     
     if confirm:
-        registry.mock_file.unlink()
+        registry.clear_mocks(category)
         rprint("[green]✅ Mocks cleared successfully[/green]")
     else:
         rprint("[yellow]Cancelled[/yellow]")
@@ -221,40 +263,35 @@ def clear(
 
 @app.command()
 def inspect(
-    tool: Optional[str] = typer.Option(None, "--tool", "-t", help="Filter by tool name")
+    tool: Optional[str] = typer.Option(None, "--tool", "-t", help="Filter by tool name"),
+    category: Optional[str] = typer.Option(None, "--category", "-c", help="Filter by category (tools/resources/prompts)")
 ):
     """🔍 Inspect recorded mocks"""
     
-    registry = MockRegistry()
+    registry = JsonRegistry()
+    mocks = registry.list_mocks(category=category)
     
-    if not registry.mock_file.exists():
-        rprint("[yellow]❌ No mocks.json found[/yellow]")
+    if not mocks:
+        rprint("[yellow]❌ No mocks found[/yellow]")
         return
     
-    if not registry.mocks:
-        rprint("[yellow]ℹ️  mocks.json is empty[/yellow]")
-        return
+    # Filter by tool if specified
+    if tool:
+        mocks = [m for m in mocks if m.name == tool]
+        if not mocks:
+            rprint(f"[yellow]❌ No mocks found for tool '{tool}'[/yellow]")
+            return
     
     import json
     
-    rprint(f"\n[bold cyan]📋 Recorded Mocks ({len(registry.mocks)} total)[/bold cyan]\n")
+    rprint(f"\n[bold cyan]📋 Recorded Mocks ({len(mocks)} total)[/bold cyan]\n")
     
-    for i, (key, response) in enumerate(registry.mocks.items(), 1):
-        try:
-            data = json.loads(key)
-            tool_name = data.get("tool", "unknown")
-            args = data.get("args", {})
-            
-            # Filter by tool if specified
-            if tool and tool_name != tool:
-                continue
-            
-            rprint(f"[bold]{i}. {tool_name}[/bold]")
-            rprint(f"   Args: {args}")
-            rprint(f"   Response: {json.dumps(response, indent=2)[:200]}...")
-            rprint()
-        except:
-            rprint(f"[red]{i}. Invalid mock entry[/red]")
+    for i, mock in enumerate(mocks, 1):
+        rprint(f"[bold]{i}. {mock.name}[/bold] [dim]({mock.category})[/dim]")
+        rprint(f"   Args: {mock.arguments}")
+        rprint(f"   Response: {json.dumps(mock.response, indent=2)[:200]}...")
+        rprint(f"   Recorded: {mock.recorded_at.strftime('%Y-%m-%d %H:%M:%S')}")
+        rprint()
 
 
 if __name__ == "__main__":
