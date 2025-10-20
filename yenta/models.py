@@ -1,7 +1,7 @@
 from datetime import datetime
-from pathlib import Path
-from typing import Optional, Dict, Any, List
+from typing import Dict, Any, List
 from pydantic import BaseModel, Field
+
 
 class TestResult(BaseModel):
     """Individual test result"""
@@ -15,6 +15,7 @@ class TestResult(BaseModel):
     failures: List[str] = []
     expected: Dict[str, Any] = {}
 
+
 class TestRun(BaseModel):
     """Complete test run"""
     session_id: str
@@ -26,6 +27,7 @@ class TestRun(BaseModel):
     results: List[TestResult]
     metadata: Dict[str, Any] = {}
 
+
 class Mock(BaseModel):
     """Recorded mock"""
     category: str  # 'tools', 'resources', 'prompts'
@@ -33,6 +35,7 @@ class Mock(BaseModel):
     arguments: Dict[str, Any]
     response: Dict[str, Any]
     recorded_at: datetime = Field(default_factory=datetime.utcnow)
+
 
 class Capabilities(BaseModel):
     """Server capabilities"""
