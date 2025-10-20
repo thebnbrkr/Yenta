@@ -3,8 +3,8 @@ from pathlib import Path
 from pydantic import ValidationError
 from agora.telemetry import AuditedAsyncNode, AuditedAsyncBatchNode
 from .schemas import SCHEMA_REGISTRY
-from .registry import JsonRegistry as MockRegistry  # NEW: Use JsonRegistry
-from .models import TestRun, TestResult  # NEW: Import models
+from .registry import JsonRegistry as MockRegistry
+from .models import TestRun, TestResult
 
 try:
     from fastmcp import Client
@@ -26,7 +26,7 @@ class LoadSpecNode(AuditedAsyncNode):
 
     async def post_async(self, shared, _, spec_dict):
         shared["spec"] = spec_dict
-        shared["start_time"] = time.time()  # NEW: Track start time
+        shared["start_time"] = time.time()
         agent = spec_dict.get("agent_name", "<unnamed>")
         tools = spec_dict.get("tools", [])
         tests = spec_dict.get("custom_tests", [])
@@ -41,7 +41,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
 
     def __init__(self, name, audit_logger):
         super().__init__(name, audit_logger)
-        self.mock_registry = MockRegistry()  # Uses JsonRegistry
+        self.mock_registry = MockRegistry()
 
     async def prep_async(self, shared):
         spec = shared["spec"]
@@ -54,11 +54,9 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         else:
             raise ValueError("spec must include mcp_server or mcp_servers")
 
-        # Get global flags
         global_use_mocks = spec.get("use_mocks", False)
         global_record_mocks = spec.get("record_mocks", False)
 
-        # Pass global flags WITH each test pair
         return [{
             "server_path": s, 
             "test": t,
@@ -72,30 +70,24 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         name, tool, args = test_case["name"], test_case["tool"], test_case.get("arguments", {})
         timeout = int(test_case.get("timeout_sec", 45))
 
-        # Determine if we should use mocks (per-test overrides global)
         use_mocks = test_case.get("use_mocks", pair.get("global_use_mocks", False))
         record_mocks = test_case.get("record_mocks", pair.get("global_record_mocks", False))
         
-        mode = "real"  # Can be: mock, replay, recorded, real
-        
-        # --- MOCKING LOGIC ---
+        mode = "real"
         start = time.time()
         
-        # 1. Inline mock (highest priority)
         if use_mocks and "mock" in test_case:
             print(f"  [mocked] {name} ...")
             resp = test_case["mock"]
             latency_ms = 0.0
             mode = "mock"
         
-        # 2. Replay from registry
         elif use_mocks and self.mock_registry.has_mock(tool, args):
             print(f"  [replayed] {name} ...")
             resp = self.mock_registry.get(tool, args)
             latency_ms = 0.0
             mode = "replay"
         
-        # 3. Real MCP call
         else:
             if not FASTMCP_AVAILABLE:
                 return {
@@ -122,7 +114,6 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                     )
                     latency_ms = (time.time() - start) * 1000.0
                     
-                    # Extract text from MCP response
                     if hasattr(result, 'content') and result.content:
                         content = result.content[0]
                         resp = {"result": content.text if hasattr(content, 'text') else str(content)}
@@ -131,7 +122,6 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                     
                     mode = "recorded" if record_mocks else "real"
                     
-                    # Record if requested
                     if record_mocks:
                         self.mock_registry.record(tool, args, resp)
                         
@@ -144,12 +134,10 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                 resp = {"error": f"{type(e).__name__}: {str(e)}"}
                 mode = "error"
 
-        # --- VALIDATION LOGIC (same for mocks and real calls) ---
         status = "PASS" if "error" not in resp else "FAIL"
         failures = []
         details = {"latency_ms": round(latency_ms, 2)}
 
-        # Schema validation
         schema_name = test_case.get("expected_schema")
         if status == "PASS" and schema_name:
             model = SCHEMA_REGISTRY.get(schema_name)
@@ -161,7 +149,6 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                 except ValidationError as e:
                     status, failures = "FAIL", [f"Schema validation failed: {e}"]
 
-        # Keyword checks (CASE-INSENSITIVE)
         keywords = test_case.get("expected_keywords", [])
         if status == "PASS" and keywords:
             jam = json.dumps(resp, ensure_ascii=False).lower()
@@ -169,7 +156,6 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
             if missing:
                 status, failures = "FAIL", [f"Missing keywords: {missing}"]
 
-        # Latency assertions
         metrics = test_case.get("expected_metrics", {})
         max_latency = metrics.get("max_latency_ms")
         if status == "PASS" and isinstance(max_latency, (int, float)):
@@ -194,7 +180,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         total, passed = len(results), sum(1 for r in results if r["status"] == "PASS")
         print(f"\n  Completed: {passed}/{total} tests passed\n")
         
-        # NEW: Save run history
+        # FIXED: Save run history with proper TestResult construction
         try:
             duration_ms = (time.time() - shared.get("start_time", time.time())) * 1000
             run = TestRun(
@@ -203,7 +189,17 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                 server=shared["spec"].get("mcp_server", shared["spec"].get("mcp_servers", ["unknown"])[0]),
                 status="completed",
                 duration_ms=duration_ms,
-                results=[TestResult(**r) for r in results]
+                results=[TestResult(
+                    test_name=r["test_name"],
+                    tool=r["tool"],
+                    arguments=r["arguments"],
+                    response=r["response"],
+                    status=r["status"],
+                    latency_ms=r["metrics"].get("latency_ms", 0.0),  # ✅ FIXED: Extract from metrics
+                    mode=r["mode"],
+                    failures=r.get("failures", []),
+                    expected=r.get("expected", {})
+                ) for r in results]
             )
             self.mock_registry.save_run(run)
         except Exception as e:
