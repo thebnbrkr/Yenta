@@ -1,3 +1,4 @@
+# yenta/registry.py
 import json
 import hashlib
 from pathlib import Path
@@ -15,7 +16,6 @@ class JsonRegistry:
         self.mocks_dir = self.data_dir / "mocks"
         self.capabilities_dir = self.data_dir / "capabilities"
         
-        # Create directory structure
         for dir_path in [self.runs_dir, 
                          self.mocks_dir / "tools", 
                          self.mocks_dir / "resources", 
@@ -23,11 +23,9 @@ class JsonRegistry:
                          self.capabilities_dir]:
             dir_path.mkdir(parents=True, exist_ok=True)
         
-        # Load index for fast lookups
         self.index_file = self.mocks_dir / "index.json"
         self.index = self._load_index()
         
-        # Handle legacy migration
         self._migrate_legacy_if_needed()
     
     # ============================================================
@@ -56,19 +54,19 @@ class JsonRegistry:
             response=response
         )
         
-        # Generate unique filename
         args_hash = self._hash_args(args)
         filename = f"{tool}_{args_hash}.json"
         
         file_path = self.mocks_dir / category / filename
-        file_path.write_text(json.dumps(mock.dict(), indent=2, default=str, ensure_ascii=False))
+        # ✅ FIXED: Use model_dump() instead of dict()
+        file_path.write_text(json.dumps(mock.model_dump(), indent=2, default=str, ensure_ascii=False))
         
-        # Update index
         key = self._get_mock_key(category, tool, args)
         self.index[key] = str(file_path.relative_to(self.data_dir))
         self._save_index()
         
-        print(f"📁 Saved to {file_path.relative_to(Path.cwd())}")
+        # ✅ FIXED: Simple print without relative_to issues
+        print(f"📁 Saved to {file_path}")
     
     def load_mock(self, category: str, tool: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         """Load mock from organized directory"""
@@ -125,7 +123,6 @@ class JsonRegistry:
                     for mock_file in cat_dir.glob("*.json"):
                         mock_file.unlink()
         
-        # Clear index
         self.index = {}
         self._save_index()
     
@@ -135,24 +132,23 @@ class JsonRegistry:
     
     def save_run(self, run: TestRun):
         """Save test run history"""
-        from datetime import datetime
         timestamp = run.timestamp.strftime("%Y%m%d_%H%M%S")
         filename = f"{timestamp}_{run.spec_name.replace('.yaml', '').replace('/', '_')}.json"
         
         file_path = self.runs_dir / filename
-        file_path.write_text(json.dumps(run.dict(), indent=2, default=str, ensure_ascii=False))
+        # ✅ FIXED: Use model_dump() instead of dict()
+        file_path.write_text(json.dumps(run.model_dump(), indent=2, default=str, ensure_ascii=False))
         
-        # Update 'latest' symlink (or copy on Windows)
         latest = self.runs_dir / "latest.json"
         try:
             if latest.exists():
                 latest.unlink()
             latest.symlink_to(filename)
         except (OSError, NotImplementedError):
-            # Windows may not support symlinks, copy instead
             latest.write_text(file_path.read_text())
         
-        print(f"💾 Run saved to {file_path.relative_to(Path.cwd())}")
+        # ✅ FIXED: Simple print without relative_to issues
+        print(f"💾 Run saved to {file_path}")
     
     def load_latest_run(self) -> Optional[TestRun]:
         """Load most recent run"""
@@ -191,8 +187,9 @@ class JsonRegistry:
     def save_capabilities(self, capabilities: Capabilities):
         """Save server capabilities manifest"""
         file_path = self.capabilities_dir / "manifest.json"
-        file_path.write_text(json.dumps(capabilities.dict(), indent=2, default=str, ensure_ascii=False))
-        print(f"📋 Capabilities saved to {file_path.relative_to(Path.cwd())}")
+        # ✅ FIXED: Use model_dump() instead of dict()
+        file_path.write_text(json.dumps(capabilities.model_dump(), indent=2, default=str, ensure_ascii=False))
+        print(f"📋 Capabilities saved to {file_path}")
     
     def load_capabilities(self) -> Optional[Capabilities]:
         """Load server capabilities"""
@@ -251,13 +248,11 @@ class JsonRegistry:
                     tool = data.get("tool", "unknown")
                     args = data.get("args", {})
                     
-                    # All legacy mocks are tools
                     self.save_mock("tools", tool, args, response)
                     migrated += 1
                 except Exception as e:
                     print(f"⚠️  Skipped invalid entry: {str(e)[:50]}...")
             
-            # Backup old file
             legacy_file.rename("mocks.json.old")
             print(f"✅ Migrated {migrated} mocks! Old file renamed to mocks.json.old")
         except Exception as e:
