@@ -1,5 +1,3 @@
-"""Parse workflow syntax into node connections."""
-
 import re
 from typing import List, Tuple, Optional
 
@@ -15,6 +13,7 @@ class WorkflowParser:
         Examples:
             "tool_a >> tool_b" -> [("tool_a", None, "tool_b")]
             "tool_a - 'error' >> tool_b" -> [("tool_a", "error", "tool_b")]
+            "tool_a" -> [("tool_a", None, "complete")]  # Single tool
         
         Returns:
             List of (source_node, action, target_node) tuples
@@ -23,7 +22,14 @@ class WorkflowParser:
         
         for line in workflow_lines:
             line = line.strip()
-            if not line or not '>>' in line:
+            if not line:
+                continue
+            
+            # Check if it's a single tool (no >>)
+            if '>>' not in line:
+                # Single tool workflow
+                tool_name = line.strip()
+                connections.append((tool_name, None, "complete"))
                 continue
             
             # Match: "source >> target" or "source - 'action' >> target"
@@ -40,10 +46,7 @@ class WorkflowParser:
     
     @staticmethod
     def get_ordered_nodes(connections: List[Tuple[str, Optional[str], str]]) -> List[str]:
-        """
-        Extract ordered list of unique nodes from connections.
-        Preserves execution order (source nodes before target nodes).
-        """
+        """Extract ordered list of unique nodes from connections."""
         nodes = []
         seen = set()
         
@@ -51,7 +54,8 @@ class WorkflowParser:
             if source not in seen:
                 nodes.append(source)
                 seen.add(source)
-            if target not in seen:
+            # Don't add "complete" as a node
+            if target != "complete" and target not in seen:
                 nodes.append(target)
                 seen.add(target)
         
@@ -59,18 +63,9 @@ class WorkflowParser:
     
     @staticmethod
     def get_start_node(connections: List[Tuple[str, Optional[str], str]]) -> str:
-        """Get the first node in the workflow (node that's never a target)."""
+        """Get the first node in the workflow."""
         if not connections:
             raise ValueError("No workflow connections found")
         
-        # Find nodes that appear as sources but never as targets
-        sources = {conn[0] for conn in connections}
-        targets = {conn[2] for conn in connections}
-        start_nodes = sources - targets
-        
-        if not start_nodes:
-            # No clear start node, return first source
-            return connections[0][0]
-        
-        # Return the first start node (in case of multiple entry points)
-        return list(start_nodes)[0]
+        # Return first source node
+        return connections[0][0]
