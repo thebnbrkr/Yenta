@@ -3,18 +3,19 @@ import typer
 import yaml
 import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Dict, Any
 from rich.console import Console
 from rich.table import Table
 from rich import print as rprint
 
 from agora.telemetry import AuditLogger
 from yenta.flow import MCPTestFlow
+from yenta.workflow_flow import MCPWorkflowFlow
 from yenta.registry import JsonRegistry
 
 app = typer.Typer(
     name="yenta",
-    help="🎭 Yenta - MCP Testing Framework with Record/Replay",
+    help="🎭 Yenta - MCP Testing & Workflow Orchestration Framework",
     add_completion=False
 )
 console = Console()
@@ -67,6 +68,95 @@ async def _run_flow(spec_file: Path, session_id: Optional[str] = None, override_
             Path(tmp_path).unlink(missing_ok=True)
 
 
+async def _run_workflow(
+    workflow_file: Path, 
+    session_id: Optional[str] = None,
+    input_data: Optional[Dict[str, Any]] = None
+):
+    """Internal helper to run workflow orchestration"""
+    
+    if not workflow_file.exists():
+        rprint(f"[red]❌ Workflow file not found: {workflow_file}[/red]")
+        raise typer.Exit(1)
+    
+    # Load workflow YAML
+    with open(workflow_file) as f:
+        spec = yaml.safe_load(f)
+    
+    # Extract required fields
+    workflow_name = spec.get("workflow_name", workflow_file.stem)
+    server_path = spec.get("mcp_server")
+    workflow_lines = spec.get("workflow", [])
+    initial_input = spec.get("initial_input", {})
+    
+    # Merge CLI input with YAML input
+    if input_data:
+        initial_input.update(input_data)
+    
+    if not server_path:
+        rprint("[red]❌ Missing 'mcp_server' in workflow YAML[/red]")
+        raise typer.Exit(1)
+    
+    if not workflow_lines:
+        rprint("[red]❌ Missing 'workflow' in workflow YAML[/red]")
+        raise typer.Exit(1)
+    
+    # Create logger and flow
+    logger = AuditLogger(session_id=session_id or f"workflow-{workflow_name}")
+    
+    try:
+        flow = MCPWorkflowFlow(
+            workflow_name=workflow_name,
+            server_path=server_path,
+            workflow_spec=workflow_lines,
+            logger=logger,
+            initial_input=initial_input
+        )
+        
+        # Run workflow
+        rprint(f"\n🔄 [bold cyan]Running workflow:[/bold cyan] {workflow_name}\n")
+        result = await flow.run_async()
+        
+        # Print results
+        rprint("\n" + "=" * 70)
+        rprint("✅ [bold green]WORKFLOW COMPLETED[/bold green]")
+        rprint("=" * 70)
+        
+        # Show outputs from each node
+        rprint("\n[bold]Node Outputs:[/bold]")
+        for key, value in result.items():
+            if key.endswith("_output"):
+                node_name = key.replace("_output", "")
+                rprint(f"\n[cyan]{node_name}:[/cyan]")
+                # Pretty print the output
+                import json
+                try:
+                    rprint(f"  {json.dumps(value, indent=2)[:500]}")
+                except:
+                    rprint(f"  {str(value)[:500]}")
+        
+        # Print telemetry summary
+        rprint("\n" + "=" * 70)
+        rprint("📊 [bold cyan]TELEMETRY SUMMARY[/bold cyan]")
+        rprint("=" * 70)
+        summary = logger.get_summary()
+        rprint(f"Session ID: {summary['session_id']}")
+        rprint(f"Total Events: {summary['total_events']}")
+        rprint(f"Duration: {summary.get('duration_seconds', 0):.2f}s")
+        
+        rprint("\n[bold]Event Breakdown:[/bold]")
+        for event, count in summary['event_counts'].items():
+            rprint(f"  {event}: {count}")
+        
+        return result
+        
+    except Exception as e:
+        rprint(f"\n[red]❌ Workflow failed: {e}[/red]")
+        import traceback
+        traceback.print_exc()
+        raise typer.Exit(1)
+
+
 @app.command()
 def run(
     spec_file: str = typer.Argument(..., help="YAML spec file to run"),
@@ -101,6 +191,34 @@ def run(
     except Exception as e:
         rprint(f"[red]❌ Test run failed: {e}[/red]")
         raise typer.Exit(1)
+
+
+@app.command()
+def workflow(
+    workflow_file: str = typer.Argument(..., help="Workflow YAML file to run"),
+    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID"),
+    input: Optional[str] = typer.Option(None, "--input", "-i", help="Initial input as JSON string")
+):
+    """🔗 Run MCP workflow orchestration"""
+    
+    workflow_path = Path(workflow_file)
+    
+    # Parse input JSON if provided
+    input_data = None
+    if input:
+        import json
+        try:
+            input_data = json.loads(input)
+        except json.JSONDecodeError as e:
+            rprint(f"[red]❌ Invalid JSON input: {e}[/red]")
+            raise typer.Exit(1)
+    
+    try:
+        asyncio.run(_run_workflow(workflow_path, session_id, input_data))
+    except Exception as e:
+        if not isinstance(e, typer.Exit):
+            rprint(f"[red]❌ Workflow execution failed: {e}[/red]")
+            raise typer.Exit(1)
 
 
 @app.command()
