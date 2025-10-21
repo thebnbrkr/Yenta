@@ -29,29 +29,36 @@ class MCPNode(AuditedAsyncNode):
         self.next_node = next_node
     
     async def prep_async(self, shared: Dict[str, Any]) -> Any:
-        """Get input from previous node's output - RAW."""
+        """Get input from previous node's output - convert to dict if needed."""
         # Check if this is the first node with initial input
         if f"{self.name}_input" in shared:
             return shared[f"{self.name}_input"]
         
-        # Get output from previous node - WHATEVER IT WAS
+        # Get output from previous node
         prev_output_key = shared.get("_prev_output_key")
         if prev_output_key:
-            return shared.get(prev_output_key, {})
+            prev_output = shared.get(prev_output_key, {})
+            
+            # ✅ Convert MCP response objects to dict for next tool
+            if hasattr(prev_output, 'model_dump'):
+                # It's a Pydantic model (like CallToolResult)
+                return prev_output.model_dump()
+            
+            return prev_output
         
         # No input available
         return {}
     
     async def exec_async(self, input_data: Any) -> Any:
-        """Execute MCP entity call - return RAW result, NO WRAPPING."""
+        """Execute MCP entity call - return RAW result."""
         if not FASTMCP_AVAILABLE:
             raise RuntimeError("FastMCP not installed")
         
         async with Client(self.server_path) as client:
             if self.entity_type == "tool":
-                # ✅ Call tool and return EXACTLY what it returns
+                # ✅ Call tool and return RAW result
                 result = await client.call_tool(self.entity_name, input_data)
-                return result  # RAW - no processing!
+                return result  # RAW CallToolResult object
             
             elif self.entity_type == "prompt":
                 result = await client.get_prompt(self.entity_name, input_data)
