@@ -123,17 +123,33 @@ async def _run_workflow(
         rprint("=" * 70)
         
         # Show outputs from each node
+        import json
         rprint("\n[bold]Node Outputs:[/bold]")
         for key, value in result.items():
             if key.endswith("_output"):
                 node_name = key.replace("_output", "")
                 rprint(f"\n[cyan]{node_name}:[/cyan]")
-                # Pretty print the output
-                import json
-                try:
-                    rprint(f"  {json.dumps(value, indent=2)[:500]}")
-                except:
-                    rprint(f"  {str(value)[:500]}")
+                
+                # Handle FastMCP response objects
+                if hasattr(value, '__dict__'):
+                    # It's a FastMCP object - show its attributes
+                    rprint(f"  Type: {type(value).__name__}")
+                    if hasattr(value, 'content') and value.content:
+                        rprint(f"  Content: {str(value.content)[:500]}")
+                    elif hasattr(value, 'model_dump'):
+                        # Pydantic model
+                        try:
+                            rprint(f"  {json.dumps(value.model_dump(), indent=2, default=str)[:500]}")
+                        except:
+                            rprint(f"  {str(value)[:500]}")
+                    else:
+                        rprint(f"  {str(value)[:500]}")
+                else:
+                    # It's already a simple type
+                    try:
+                        rprint(f"  {json.dumps(value, indent=2, default=str)[:500]}")
+                    except:
+                        rprint(f"  {str(value)[:500]}")
         
         # Print telemetry summary
         rprint("\n" + "=" * 70)
