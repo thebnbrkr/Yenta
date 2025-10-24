@@ -34,29 +34,38 @@ class WorkflowParser:
                 connections.append((tool_name, None, "complete", None))
                 continue
             
-            # Match: "source >> target[params]" or "source - 'action' >> target[params]"
+            # Match: "source[params] >> target[params]" or "source - 'action' >> target[params]"
             # Pattern breakdown:
             # (\w+) - source node
+            # (?:\[([^\]]+)\])? - optional source params [param1,param2]
             # (?:\s*-\s*['\"](\w+)['\"])? - optional action
             # \s*>>\s* - separator
             # (\w+) - target node
-            # (?:\[([^\]]+)\])? - optional [param1,param2]
+            # (?:\[([^\]]+)\])? - optional target params [param1,param2]
             match = re.match(
-                r"(\w+)(?:\s*-\s*['\"](\w+)['\"])?\s*>>\s*(\w+)(?:\[([^\]]+)\])?", 
+                r"(\w+)(?:\[([^\]]+)\])?(?:\s*-\s*['\"](\w+)['\"])?\s*>>\s*(\w+)(?:\[([^\]]+)\])?", 
                 line
             )
             
             if match:
                 source = match.group(1)
-                action = match.group(2)  # None if no conditional
-                target = match.group(3)
-                params_str = match.group(4)  # None if no [params]
+                source_params_str = match.group(2)  # Source params (new!)
+                action = match.group(3)  # None if no conditional
+                target = match.group(4)
+                target_params_str = match.group(5)  # Target params
                 
-                # Parse params if present
+                # For now, we only support params on TARGET (not source)
+                # But we need to parse source params to not break the regex
+                # Future: could support both source and target params
+                
+                # Parse target params if present
                 params = None
-                if params_str:
+                if target_params_str:
                     # Split by comma and strip whitespace
-                    params = [p.strip() for p in params_str.split(',')]
+                    params = [p.strip() for p in target_params_str.split(',')]
+                elif source_params_str:
+                    # If params are on source (legacy format), use those
+                    params = [p.strip() for p in source_params_str.split(',')]
                 
                 connections.append((source, action, target, params))
         
