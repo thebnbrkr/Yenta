@@ -21,15 +21,15 @@ class MCPNode(AuditedAsyncNode):
         entity_name: str, 
         server_path: str,
         next_node: Optional[str] = None,
-        explicit_params: Optional[List[str]] = None  # ✨ NEW: User-specified params
+        explicit_params: Optional[List[str]] = None  # User-specified params
     ):
         super().__init__(name, audit_logger)
         self.entity_type = entity_type
         self.entity_name = entity_name
         self.server_path = server_path
         self.next_node = next_node
-        self.explicit_params = explicit_params  # ✨ From YAML [param1,param2]
-        self.discovered_params = None  # ✨ Auto-discovered tool params
+        self.explicit_params = explicit_params  # From YAML [param1,param2]
+        self.discovered_params = None  # Auto-discovered tool params
     
     async def _discover_tool_params(self) -> Optional[List[str]]:
         """
@@ -45,7 +45,8 @@ class MCPNode(AuditedAsyncNode):
             async with Client(self.server_path) as client:
                 tools_result = await client.list_tools()
                 
-                for tool in tools_result.tools:
+                # FIX: tools_result is already a list-like object
+                for tool in tools_result:
                     if tool.name == self.entity_name:
                         # Extract parameter names from JSON schema
                         schema = tool.inputSchema
@@ -75,11 +76,19 @@ class MCPNode(AuditedAsyncNode):
             if prev_output_key:
                 prev_output = shared.get(prev_output_key, {})
                 
-                # ✅ Convert MCP response objects to dict
-                if hasattr(prev_output, 'model_dump'):
+                # FIX: Handle custom node output format
+                # Custom nodes (ValidationNode/RoutingNode) store:
+                # {"input": {...}, "routing_key": "..."}
+                if isinstance(prev_output, dict) and 'input' in prev_output and 'routing_key' in prev_output:
+                    # This came from a ValidationNode/RoutingNode - extract the actual input
+                    input_data = prev_output['input']
+                
+                # Convert MCP response objects to dict
+                elif hasattr(prev_output, 'model_dump'):
                     input_data = prev_output.model_dump()
+                
+                # Extract from CallToolResult content
                 elif hasattr(prev_output, 'content') and prev_output.content:
-                    # Extract from CallToolResult
                     try:
                         # Try to get text from content
                         content_item = prev_output.content[0]
@@ -89,6 +98,7 @@ class MCPNode(AuditedAsyncNode):
                             input_data = {"result": str(content_item)}
                     except:
                         input_data = {}
+                
                 else:
                     input_data = prev_output
             else:
@@ -98,13 +108,13 @@ class MCPNode(AuditedAsyncNode):
         if not isinstance(input_data, dict):
             return input_data
         
-        # ✨ OPTION 3: Use explicit params if specified
+        # OPTION 3: Use explicit params if specified
         if self.explicit_params:
             filtered = {k: v for k, v in input_data.items() if k in self.explicit_params}
             print(f"  🎯 Filtering to explicit params: {self.explicit_params}")
             return filtered
         
-        # ✨ OPTION 2: Auto-discover and filter
+        # OPTION 2: Auto-discover and filter
         if self.discovered_params is None and self.entity_type == "tool":
             self.discovered_params = await self._discover_tool_params()
         
