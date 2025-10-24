@@ -83,7 +83,7 @@ class MCPNode(AuditedAsyncNode):
                     # This came from a ValidationNode/RoutingNode - extract the actual input
                     input_data = prev_output['input']
                 
-                # Convert MCP response objects to dict
+                #  Convert MCP response objects to dict
                 elif hasattr(prev_output, 'model_dump'):
                     input_data = prev_output.model_dump()
                 
@@ -111,7 +111,7 @@ class MCPNode(AuditedAsyncNode):
         # OPTION 3: Use explicit params if specified
         if self.explicit_params:
             filtered = {k: v for k, v in input_data.items() if k in self.explicit_params}
-            print(f"  🎯 Filtering to explicit params: {self.explicit_params}")
+            print(f"  Filtering to explicit params: {self.explicit_params}")
             return filtered
         
         # OPTION 2: Auto-discover and filter
@@ -120,7 +120,7 @@ class MCPNode(AuditedAsyncNode):
         
         if self.discovered_params:
             filtered = {k: v for k, v in input_data.items() if k in self.discovered_params}
-            print(f"  🔍 Auto-filtered to: {list(filtered.keys())}")
+            print(f"  Auto-filtered to: {list(filtered.keys())}")
             return filtered
         
         # Fallback: pass everything
@@ -155,4 +155,6 @@ class MCPNode(AuditedAsyncNode):
         shared["_prev_output_key"] = output_key
         
         # Return routing key for Agora
-        return self.next_node if self.next_node else "complete"
+        # For default (no action) routing, return empty string
+        # For conditional routing, return the action key
+        return ""  # Default route - let Agora handle >> wiring
