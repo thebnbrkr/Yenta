@@ -1,22 +1,24 @@
 import re
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict
 
 
 class WorkflowParser:
     """Parse >> syntax into workflow nodes and edges."""
     
     @staticmethod
-    def parse_workflow(workflow_lines: List[str]) -> List[Tuple[str, Optional[str], str]]:
+    def parse_workflow(workflow_lines: List[str]) -> List[Tuple[str, Optional[str], str, Optional[List[str]]]]:
         """
-        Parse workflow lines into (source, action, target) tuples.
+        Parse workflow lines into (source, action, target, params) tuples.
         
         Examples:
-            "tool_a >> tool_b" -> [("tool_a", None, "tool_b")]
-            "tool_a - 'error' >> tool_b" -> [("tool_a", "error", "tool_b")]
-            "tool_a" -> [("tool_a", None, "complete")]  # Single tool
+            "tool_a >> tool_b" -> [("tool_a", None, "tool_b", None)]
+            "tool_a - 'error' >> tool_b" -> [("tool_a", "error", "tool_b", None)]
+            "tool_a >> tool_b[url]" -> [("tool_a", None, "tool_b", ["url"])]
+            "tool_a >> tool_b[url,limit]" -> [("tool_a", None, "tool_b", ["url", "limit"])]
+            "tool_a" -> [("tool_a", None, "complete", None)]  # Single tool
         
         Returns:
-            List of (source_node, action, target_node) tuples
+            List of (source_node, action, target_node, params) tuples
         """
         connections = []
         
@@ -29,28 +31,44 @@ class WorkflowParser:
             if '>>' not in line:
                 # Single tool workflow
                 tool_name = line.strip()
-                connections.append((tool_name, None, "complete"))
+                connections.append((tool_name, None, "complete", None))
                 continue
             
-            # Match: "source >> target" or "source - 'action' >> target"
-            match = re.match(r"(\w+)(?:\s*-\s*['\"](\w+)['\"])?\s*>>\s*(\w+)", line)
+            # Match: "source >> target[params]" or "source - 'action' >> target[params]"
+            # Pattern breakdown:
+            # (\w+) - source node
+            # (?:\s*-\s*['\"](\w+)['\"])? - optional action
+            # \s*>>\s* - separator
+            # (\w+) - target node
+            # (?:\[([^\]]+)\])? - optional [param1,param2]
+            match = re.match(
+                r"(\w+)(?:\s*-\s*['\"](\w+)['\"])?\s*>>\s*(\w+)(?:\[([^\]]+)\])?", 
+                line
+            )
             
             if match:
                 source = match.group(1)
                 action = match.group(2)  # None if no conditional
                 target = match.group(3)
+                params_str = match.group(4)  # None if no [params]
                 
-                connections.append((source, action, target))
+                # Parse params if present
+                params = None
+                if params_str:
+                    # Split by comma and strip whitespace
+                    params = [p.strip() for p in params_str.split(',')]
+                
+                connections.append((source, action, target, params))
         
         return connections
     
     @staticmethod
-    def get_ordered_nodes(connections: List[Tuple[str, Optional[str], str]]) -> List[str]:
+    def get_ordered_nodes(connections: List[Tuple[str, Optional[str], str, Optional[List[str]]]]) -> List[str]:
         """Extract ordered list of unique nodes from connections."""
         nodes = []
         seen = set()
         
-        for source, _, target in connections:
+        for source, _, target, _ in connections:
             if source not in seen:
                 nodes.append(source)
                 seen.add(source)
@@ -62,10 +80,34 @@ class WorkflowParser:
         return nodes
     
     @staticmethod
-    def get_start_node(connections: List[Tuple[str, Optional[str], str]]) -> str:
+    def get_start_node(connections: List[Tuple[str, Optional[str], str, Optional[List[str]]]]) -> str:
         """Get the first node in the workflow."""
         if not connections:
             raise ValueError("No workflow connections found")
         
         # Return first source node
         return connections[0][0]
+    
+    @staticmethod
+    def get_node_params(
+        connections: List[Tuple[str, Optional[str], str, Optional[List[str]]]], 
+        node_name: str
+    ) -> Optional[List[str]]:
+        """
+        Get the explicitly specified parameters for a node.
+        
+        Args:
+            connections: List of parsed connections
+            node_name: Name of the node to look up
+        
+        Returns:
+            List of parameter names if specified, None otherwise
+        
+        Example:
+            For "scrape_url >> map_website[url]"
+            get_node_params(connections, "map_website") -> ["url"]
+        """
+        for _, _, target, params in connections:
+            if target == node_name and params:
+                return params
+        return None
