@@ -2,6 +2,7 @@ import asyncio
 import typer
 import yaml
 import tempfile
+import sys
 from pathlib import Path
 from typing import Optional, Dict, Any
 from rich.console import Console
@@ -15,7 +16,7 @@ from yenta.registry import JsonRegistry
 
 app = typer.Typer(
     name="yenta",
-    help="🎭 Yenta - MCP Testing & Workflow Orchestration Framework",
+    help=" Yenta - MCP Testing & Workflow Orchestration Framework",
     add_completion=False
 )
 console = Console()
@@ -71,7 +72,8 @@ async def _run_flow(spec_file: Path, session_id: Optional[str] = None, override_
 async def _run_workflow(
     workflow_file: Path, 
     session_id: Optional[str] = None,
-    input_data: Optional[Dict[str, Any]] = None
+    input_data: Optional[Dict[str, Any]] = None,
+    debug: bool = False
 ):
     """Internal helper to run workflow orchestration"""
     
@@ -88,6 +90,7 @@ async def _run_workflow(
     server_path = spec.get("mcp_server")
     workflow_lines = spec.get("workflow", [])
     initial_input = spec.get("initial_input", {})
+    custom_nodes_file = spec.get("custom_nodes")  # ✨ FIX 1: Extract custom_nodes
     
     # Merge CLI input with YAML input
     if input_data:
@@ -110,7 +113,8 @@ async def _run_workflow(
             server_path=server_path,
             workflow_spec=workflow_lines,
             logger=logger,
-            initial_input=initial_input
+            initial_input=initial_input,
+            custom_nodes_file=custom_nodes_file  # ✨ FIX 1: Pass custom_nodes
         )
         
         # Run workflow
@@ -132,12 +136,10 @@ async def _run_workflow(
                 
                 # Handle FastMCP response objects
                 if hasattr(value, '__dict__'):
-                    # It's a FastMCP object - show its attributes
                     rprint(f"  Type: {type(value).__name__}")
                     if hasattr(value, 'content') and value.content:
                         rprint(f"  Content: {str(value.content)[:500]}")
                     elif hasattr(value, 'model_dump'):
-                        # Pydantic model
                         try:
                             rprint(f"  {json.dumps(value.model_dump(), indent=2, default=str)[:500]}")
                         except:
@@ -145,7 +147,6 @@ async def _run_workflow(
                     else:
                         rprint(f"  {str(value)[:500]}")
                 else:
-                    # It's already a simple type
                     try:
                         rprint(f"  {json.dumps(value, indent=2, default=str)[:500]}")
                     except:
@@ -167,9 +168,16 @@ async def _run_workflow(
         return result
         
     except Exception as e:
+        # ✨ FIX 3: Better error messages
         rprint(f"\n[red]❌ Workflow failed: {e}[/red]")
-        import traceback
-        traceback.print_exc()
+        
+        if debug or "--debug" in sys.argv:
+            import traceback
+            rprint("\n[dim]Full traceback:[/dim]")
+            traceback.print_exc()
+        else:
+            rprint("[dim]Run with --debug for full traceback[/dim]")
+        
         raise typer.Exit(1)
 
 
@@ -213,7 +221,8 @@ def run(
 def workflow(
     workflow_file: str = typer.Argument(..., help="Workflow YAML file to run"),
     session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID"),
-    input: Optional[str] = typer.Option(None, "--input", "-i", help="Initial input as JSON string")
+    input: Optional[str] = typer.Option(None, "--input", "-i", help="Initial input as JSON string"),
+    debug: bool = typer.Option(False, "--debug", "-d", help="Show full error tracebacks")
 ):
     """🔗 Run MCP workflow orchestration"""
     
@@ -230,7 +239,7 @@ def workflow(
             raise typer.Exit(1)
     
     try:
-        asyncio.run(_run_workflow(workflow_path, session_id, input_data))
+        asyncio.run(_run_workflow(workflow_path, session_id, input_data, debug))
     except Exception as e:
         if not isinstance(e, typer.Exit):
             rprint(f"[red]❌ Workflow execution failed: {e}[/red]")
