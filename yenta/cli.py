@@ -12,7 +12,8 @@ from rich import print as rprint
 from agora.telemetry import AuditLogger
 from yenta.flow import MCPTestFlow
 from yenta.workflow_flow import MCPWorkflowFlow
-from yenta.registry import JsonRegistry
+#from yenta.registry import JsonRegistry
+from yenta.registry import get_shared_registry
 
 app = typer.Typer(
     name="yenta",
@@ -285,7 +286,7 @@ def replay(
         rprint(f"[red]❌ Spec file not found: {spec_file}[/red]")
         raise typer.Exit(1)
     
-    registry = JsonRegistry()
+    registry = get_shared_registry()
     stats = registry.get_stats()
     if stats["total_mocks"] == 0:
         rprint("[yellow]⚠️  No mocks found. Run 'yenta record' first.[/yellow]")
@@ -304,7 +305,7 @@ def replay(
 def status():
     """📊 Show registry status"""
     
-    registry = JsonRegistry()
+    registry = get_shared_registry()
     stats = registry.get_stats()
     
     table = Table(title="🎭 Yenta Registry Status")
@@ -340,7 +341,7 @@ def history(
 ):
     """📜 Show test run history"""
     
-    registry = JsonRegistry()
+    registry = get_shared_registry()
     runs = registry.list_runs(limit=limit)
     
     if not runs:
@@ -377,7 +378,7 @@ def clear(
 ):
     """🧹 Clear recorded mocks"""
     
-    registry = JsonRegistry()
+    registry = get_shared_registry()
     stats = registry.get_stats()
     
     if stats["total_mocks"] == 0:
@@ -411,7 +412,7 @@ def inspect(
 ):
     """🔍 Inspect recorded mocks"""
     
-    registry = JsonRegistry()
+    registry = get_shared_registry()
     mocks = registry.list_mocks(category=category)
     
     if not mocks:
