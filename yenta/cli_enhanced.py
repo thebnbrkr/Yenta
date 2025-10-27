@@ -19,6 +19,7 @@ from typing import Optional
 from rich.console import Console
 from rich.table import Table
 from rich import print as rprint
+from yenta.registry import get_shared_registry
 
 from agora.telemetry import AuditLogger
 from yenta.workflow_registry import (
@@ -76,7 +77,7 @@ def discover(
             from yenta.registry import JsonRegistry
             from yenta.models import Capabilities
             
-            json_registry = JsonRegistry()
+            json_registry = get_shared_registry()
             capabilities = Capabilities(
                 server=str(server_path),
                 tools=[
@@ -308,9 +309,9 @@ def metrics(
         yenta metrics --session my-session-123
         yenta metrics --latest --format json
     """
-    from yenta.registry import JsonRegistry
+    #from yenta.registry import JsonRegistry
     
-    registry = JsonRegistry()
+    registry = get_shared_registry()
     
     if latest:
         run = registry.load_latest_run()
