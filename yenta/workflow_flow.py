@@ -1,7 +1,13 @@
 """
-Enhanced MCPWorkflowFlow with support for custom ValidationNodes/RoutingNodes.
+Enhanced MCPWorkflowFlow with support for:
+- Automatic parameter mapping (NEW!)
+- Explicit parameter specification
+- Custom ValidationNodes/RoutingNodes
 
-This enables "Option 3": YAML workflows that reference both MCP tools AND custom Python nodes.
+KEY FEATURES:
+1. Auto-mapping: node_a >> node_b (automatically matches parameter names)
+2. Explicit: node_a >> node_b[param1,param2] (only pass specified params)
+3. Custom nodes: Python ValidationNode/RoutingNode classes for complex logic
 """
 
 from typing import Dict, Any, List, Optional
@@ -15,22 +21,52 @@ from yenta.parser import WorkflowParser
 
 class MCPWorkflowFlow(AuditedAsyncFlow):
     """
-    Enhanced orchestration flow that supports:
-    - MCP tools (from FastMCP server)
-    - Custom ValidationNodes and RoutingNodes (from Python file)
-    - Explicit parameter passing (tool[param1,param2])
-    - Auto-discovery of tool parameters
-    - Mixed workflows in YAML
+    Enhanced orchestration flow with intelligent parameter mapping.
+    
+    AUTOMATIC PARAMETER MAPPING:
+    ----------------------------
+    When you connect nodes with >>, the system automatically:
+    1. Discovers what parameters the target tool accepts
+    2. Matches output keys from source with input params of target
+    3. Only passes the parameters that are needed
+    
+    Example:
+        # scrape_url outputs: {"url": "...", "title": "...", "content": "...", "links": [...]}
+        # extract_links accepts: (content: str, max_links: int = 10)
+        
+        workflow:
+          - scrape_url >> extract_links
+        
+        # System automatically passes only {"content": "..."} to extract_links
+        # Ignores url, title, links since extract_links doesn't need them
+    
+    EXPLICIT PARAMETER MAPPING:
+    ---------------------------
+    You can override auto-mapping by specifying exactly what to pass:
+    
+        workflow:
+          - scrape_url >> extract_links[content]           # Only content
+          - scrape_url >> process_page[url, title, content] # Multiple params
+    
+    CUSTOM NODES:
+    -------------
+    Mix MCP tools with custom Python logic:
+    
+        custom_nodes: "my_validators.py"
+        workflow:
+          - validate_input >> check_cache
+          - check_cache - 'hit' >> return_cached
+          - check_cache - 'miss' >> search_docs[query]
     
     Example YAML:
         workflow_name: "smart_search"
         mcp_server: "my_server.py"
-        custom_nodes: "my_validators.py"
+        custom_nodes: "my_validators.py"  # Optional
         
         workflow:
-          - validate_input >> check_cache
-          - check_cache - 'hit' >> return_cached
-          - check_cache - 'miss' >> search_docs[query]  # ✨ Only pass 'query'
+          - scrape_url >> extract_links          # Auto-mapped
+          - extract_links >> filter_links[urls]  # Explicit
+          - filter_links >> save_results         # Auto-mapped
     """
     
     def __init__(
@@ -115,11 +151,13 @@ class MCPWorkflowFlow(AuditedAsyncFlow):
     
     def _build_workflow(self):
         """
-        Parse workflow and create nodes.
+        Parse workflow and create nodes with automatic parameter mapping.
         
         For each node:
         1. Check if it's a custom node → instantiate custom class
-        2. Otherwise → create MCPNode with optional explicit params
+        2. Otherwise → create MCPNode with:
+           - Explicit params if specified: tool[param1,param2]
+           - Auto-mapping otherwise: discovers and matches params automatically
         """
         parser = WorkflowParser()
         connections = parser.parse_workflow(self.workflow_spec)
@@ -131,19 +169,20 @@ class MCPWorkflowFlow(AuditedAsyncFlow):
         self.start_node_name = parser.get_start_node(connections)
         
         print(f"\n🔨 Building workflow with {len(ordered_nodes)} nodes:")
+        print(f"   Mode: {'Explicit + Auto-mapping' if any(p for _, _, _, p in connections if p) else 'Auto-mapping'}")
         
         # Create nodes (MCP or Custom)
         for i, node_name in enumerate(ordered_nodes):
             next_node = ordered_nodes[i + 1] if i < len(ordered_nodes) - 1 else "complete"
             
-            # ✨ Get explicit params if specified (e.g., tool[url,limit])
+            # Get explicit params if specified (e.g., tool[url,limit])
             explicit_params = parser.get_node_params(connections, node_name)
             
             # Decision: Custom node or MCP tool?
             if self._is_custom_node(node_name):
                 # It's a custom ValidationNode/RoutingNode
                 custom_class = self._get_custom_node_class(node_name)
-                print(f"  🎨 Custom: {node_name} ({custom_class.__name__})")
+                print(f"   Custom: {node_name} ({custom_class.__name__})")
                 
                 node = custom_class(
                     name=node_name,
@@ -151,8 +190,12 @@ class MCPWorkflowFlow(AuditedAsyncFlow):
                 )
             else:
                 # It's an MCP tool from FastMCP server
-                param_info = f"[{','.join(explicit_params)}]" if explicit_params else ""
-                print(f"  🔧 MCP Tool: {node_name}{param_info}")
+                if explicit_params:
+                    param_info = f"[{','.join(explicit_params)}] (explicit)"
+                else:
+                    param_info = "(auto-mapped)"
+                
+                print(f"  🔧 MCP Tool: {node_name} {param_info}")
                 
                 node = MCPNode(
                     name=node_name,
@@ -161,7 +204,7 @@ class MCPWorkflowFlow(AuditedAsyncFlow):
                     entity_name=node_name,
                     server_path=self.server_path,
                     next_node=next_node,
-                    explicit_params=explicit_params  # ✨ Pass explicit params
+                    explicit_params=explicit_params  # None for auto-mapping
                 )
             
             self.nodes[node_name] = node
@@ -184,10 +227,11 @@ class MCPWorkflowFlow(AuditedAsyncFlow):
                 source_node >> target_node
         
         self.start(self.nodes[self.start_node_name])
-        print(f"\n✅ Workflow built! Starting at: {self.start_node_name}\n")
+        print(f"\n Workflow built! Starting at: {self.start_node_name}")
+        print(f"   Parameters will be {'explicitly filtered or auto-mapped' if any(self.nodes[n].explicit_params for n in self.nodes if hasattr(self.nodes[n], 'explicit_params')) else 'auto-mapped'}\n")
     
     async def run_async(self, shared: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Run the workflow."""
+        """Run the workflow with intelligent parameter mapping."""
         if shared is None:
             shared = {}
         
