@@ -1,4 +1,12 @@
+"""
+FIXED: workflow_nodes.py with proper JSON parsing for MCP responses
+
+Key fix: Lines 154-170 now parse JSON from CallToolResult.content[0].text
+instead of wrapping it in {"result": ...}
+"""
+
 import asyncio
+import json
 from typing import Any, Dict, Optional, List, Set
 from agora.telemetry import AuditedAsyncNode
 
@@ -152,16 +160,33 @@ class MCPNode(AuditedAsyncNode):
                 elif hasattr(prev_output, 'model_dump'):
                     input_data = prev_output.model_dump()
                 
-                # Extract from CallToolResult content
+                # ✨ FIX: Extract from CallToolResult content AND PARSE JSON
                 elif hasattr(prev_output, 'content') and prev_output.content:
                     try:
                         # Try to get text from content
                         content_item = prev_output.content[0]
                         if hasattr(content_item, 'text'):
-                            input_data = {"result": content_item.text}
+                            text = content_item.text
+                            
+                            # 🔥 NEW: Try to parse as JSON first
+                            try:
+                                parsed = json.loads(text)
+                                # If it's a dict, use it directly (unwrapped)
+                                if isinstance(parsed, dict):
+                                    input_data = parsed
+                                    print(f"  📦 Parsed JSON dict with keys: {list(parsed.keys())}")
+                                else:
+                                    # If it's not a dict (string, number, list, etc), wrap it
+                                    input_data = {"result": text}
+                                    print(f"  📦 Non-dict JSON, wrapped in 'result' key")
+                            except (json.JSONDecodeError, ValueError):
+                                # Not JSON, treat as plain text
+                                input_data = {"result": text}
+                                print(f"  📦 Plain text, wrapped in 'result' key")
                         else:
                             input_data = {"result": str(content_item)}
-                    except:
+                    except Exception as e:
+                        print(f"⚠️  Error extracting content: {e}")
                         input_data = {}
                 
                 else:
