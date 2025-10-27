@@ -1,4 +1,3 @@
-# yenta/registry.py
 import json
 import hashlib
 from pathlib import Path
@@ -58,14 +57,12 @@ class JsonRegistry:
         filename = f"{tool}_{args_hash}.json"
         
         file_path = self.mocks_dir / category / filename
-        # ✅ FIXED: Use model_dump() instead of dict()
         file_path.write_text(json.dumps(mock.model_dump(), indent=2, default=str, ensure_ascii=False))
         
         key = self._get_mock_key(category, tool, args)
         self.index[key] = str(file_path.relative_to(self.data_dir))
         self._save_index()
         
-        # ✅ FIXED: Simple print without relative_to issues
         print(f"📁 Saved to {file_path}")
     
     def load_mock(self, category: str, tool: str, args: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -136,7 +133,6 @@ class JsonRegistry:
         filename = f"{timestamp}_{run.spec_name.replace('.yaml', '').replace('/', '_')}.json"
         
         file_path = self.runs_dir / filename
-        # ✅ FIXED: Use model_dump() instead of dict()
         file_path.write_text(json.dumps(run.model_dump(), indent=2, default=str, ensure_ascii=False))
         
         latest = self.runs_dir / "latest.json"
@@ -147,7 +143,6 @@ class JsonRegistry:
         except (OSError, NotImplementedError):
             latest.write_text(file_path.read_text())
         
-        # ✅ FIXED: Simple print without relative_to issues
         print(f"💾 Run saved to {file_path}")
     
     def load_latest_run(self) -> Optional[TestRun]:
@@ -187,7 +182,6 @@ class JsonRegistry:
     def save_capabilities(self, capabilities: Capabilities):
         """Save server capabilities manifest"""
         file_path = self.capabilities_dir / "manifest.json"
-        # ✅ FIXED: Use model_dump() instead of dict()
         file_path.write_text(json.dumps(capabilities.model_dump(), indent=2, default=str, ensure_ascii=False))
         print(f"📋 Capabilities saved to {file_path}")
     
@@ -269,6 +263,34 @@ class JsonRegistry:
             "data_dir": str(self.data_dir.absolute())
         }
         return stats
+
+
+# ============================================================
+# SINGLETON PATTERN - SHARED REGISTRY
+# ============================================================
+
+_global_registry_instance: Optional[JsonRegistry] = None
+
+
+def get_shared_registry(data_dir: str = "data") -> JsonRegistry:
+    """
+    Get the shared global registry instance (singleton pattern).
+    
+    This ensures all CLI commands and modules use the same registry,
+    so workflows, mocks, and runs are accessible everywhere.
+    
+    Usage:
+        from yenta.registry import get_shared_registry
+        
+        registry = get_shared_registry()
+        registry.save_mock(...)
+    """
+    global _global_registry_instance
+    
+    if _global_registry_instance is None:
+        _global_registry_instance = JsonRegistry(data_dir)
+    
+    return _global_registry_instance
 
 
 # Backward compatibility alias
