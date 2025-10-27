@@ -18,7 +18,10 @@ dependencies = [
   "pyyaml",
   "opentelemetry-api",
   "opentelemetry-sdk",
-  "agora @ git+https://github.com/JerzyKultura/Agora.git"
+  "agora @ git+https://github.com/JerzyKultura/Agora.git",
+  "fastmcp",
+  "typer[all]",
+  "rich"
 ]
 
 [tool.setuptools.packages.find]

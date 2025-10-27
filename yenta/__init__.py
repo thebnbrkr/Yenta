@@ -5,6 +5,11 @@ from agora.telemetry import AuditedAsyncNode, AuditedAsyncBatchNode
 from .schemas import SCHEMA_REGISTRY
 from .registry import JsonRegistry as MockRegistry
 from .models import TestRun, TestResult
+from .schema_validation import validate_spec_file
+from .logging_config import get_logger
+from .retry_logic import retry_async, STANDARD_RETRY
+
+logger = get_logger("core")
 
 try:
     from fastmcp import Client
@@ -21,8 +26,18 @@ class LoadSpecNode(AuditedAsyncNode):
         return shared["spec_file"]
 
     async def exec_async(self, spec_file):
-        with open(spec_file) as f:
-            return yaml.safe_load(f)
+        spec_path = Path(spec_file)
+        if not spec_path.exists():
+            raise FileNotFoundError(f"Spec file not found: {spec_file}")
+        
+        try:
+            # Validate spec file against schema
+            validated_spec = validate_spec_file(spec_path)
+            logger.info(f"Spec file validated successfully: {spec_file}")
+            return validated_spec.model_dump()
+        except ValidationError as e:
+            logger.error(f"Spec validation failed for {spec_file}: {e}")
+            raise ValueError(f"Invalid spec file format: {e}")
 
     async def post_async(self, shared, _, spec_dict):
         shared["spec"] = spec_dict
@@ -30,9 +45,9 @@ class LoadSpecNode(AuditedAsyncNode):
         agent = spec_dict.get("agent_name", "<unnamed>")
         tools = spec_dict.get("tools", [])
         tests = spec_dict.get("custom_tests", [])
-        print(f"\n✓ Loaded spec: {agent}")
-        print(f"  Tools: {', '.join(tools)}")
-        print(f"  Tests to run: {len(tests)}\n")
+        logger.info(f"Loaded spec: {agent}")
+        logger.info(f"Tools: {', '.join(tools)}")
+        logger.info(f"Tests to run: {len(tests)}")
         return "run_tests"
 
 
@@ -97,7 +112,23 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                     "arguments": args,
                     "status": "FAIL",
                     "response": {"error": "FastMCP not installed"},
-                    "failures": ["pip install fastmcp"],
+                    "failures": ["FastMCP not available. Check installation."],
+                    "metrics": {"latency_ms": 0},
+                    "mode": "error",
+                    "expected": {},
+                }
+
+            # Check if server file exists
+            server_path_obj = Path(server_path)
+            if not server_path_obj.exists():
+                return {
+                    "server": server_path,
+                    "test_name": name,
+                    "tool": tool,
+                    "arguments": args,
+                    "status": "FAIL",
+                    "response": {"error": f"MCP server file not found: {server_path}"},
+                    "failures": [f"Check that the server file exists at: {server_path}"],
                     "metrics": {"latency_ms": 0},
                     "mode": "error",
                     "expected": {},
@@ -107,32 +138,39 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
             print(f"  [{mode_label}] Running [{Path(server_path).name}] :: {name} ...")
             
             try:
-                async with Client(server_path) as client:
-                    result = await asyncio.wait_for(
-                        client.call_tool(tool, args),
-                        timeout=timeout
-                    )
-                    latency_ms = (time.time() - start) * 1000.0
+                # Define the MCP call function for retry logic
+                async def call_mcp_tool():
+                    async with Client(server_path) as client:
+                        return await asyncio.wait_for(
+                            client.call_tool(tool, args),
+                            timeout=timeout
+                        )
+                
+                # Execute with retry logic
+                result = await retry_async(call_mcp_tool, config=STANDARD_RETRY)
+                latency_ms = (time.time() - start) * 1000.0
+                
+                if hasattr(result, 'content') and result.content:
+                    content = result.content[0]
+                    resp = {"result": content.text if hasattr(content, 'text') else str(content)}
+                else:
+                    resp = {"result": str(result)}
+                
+                mode = "recorded" if record_mocks else "real"
+                
+                if record_mocks:
+                    self.mock_registry.record(tool, args, resp)
                     
-                    if hasattr(result, 'content') and result.content:
-                        content = result.content[0]
-                        resp = {"result": content.text if hasattr(content, 'text') else str(content)}
-                    else:
-                        resp = {"result": str(result)}
-                    
-                    mode = "recorded" if record_mocks else "real"
-                    
-                    if record_mocks:
-                        self.mock_registry.record(tool, args, resp)
-                        
             except asyncio.TimeoutError:
                 latency_ms = (time.time() - start) * 1000.0
-                resp = {"error": f"Timeout after {timeout}s"}
+                resp = {"error": f"Timeout after {timeout}s (retries exhausted)"}
                 mode = "error"
+                logger.error(f"Timeout error for {tool} after retries: {server_path}")
             except Exception as e:
                 latency_ms = (time.time() - start) * 1000.0
-                resp = {"error": f"{type(e).__name__}: {str(e)}"}
+                resp = {"error": f"{type(e).__name__}: {str(e)} (retries exhausted)"}
                 mode = "error"
+                logger.error(f"Error for {tool} after retries: {e}")
 
         status = "PASS" if "error" not in resp else "FAIL"
         failures = []
@@ -178,7 +216,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
     async def post_async(self, shared, _, results):
         shared["results"] = results
         total, passed = len(results), sum(1 for r in results if r["status"] == "PASS")
-        print(f"\n  Completed: {passed}/{total} tests passed\n")
+        logger.info(f"Completed: {passed}/{total} tests passed")
         
         # FIXED: Save run history with proper TestResult construction
         try:
@@ -203,7 +241,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
             )
             self.mock_registry.save_run(run)
         except Exception as e:
-            print(f"⚠️  Could not save run history: {e}")
+            logger.warning(f"Could not save run history: {e}")
         
         return "report"
 
@@ -240,6 +278,6 @@ class GenerateReportNode(AuditedAsyncNode):
         return "\n".join(lines)
 
     async def post_async(self, shared, _, report):
-        print(report)
+        logger.info("Test report generated")
         shared["report"] = report
         return "complete"

@@ -8,6 +8,9 @@ TransformNode: For data transformation between nodes
 
 from typing import Any, Dict, Optional, List
 from agora.telemetry import AuditedAsyncNode
+from .logging_config import get_logger
+
+logger = get_logger("custom_nodes")
 
 
 class ValidationNode(AuditedAsyncNode):
@@ -62,13 +65,13 @@ class ValidationNode(AuditedAsyncNode):
             
             # Validate routing key if allowed_routes specified
             if self.allowed_routes and routing_key not in self.allowed_routes:
-                print(f"⚠️  Invalid route '{routing_key}' from {self.name}. Using default.")
+                logger.warning(f"Invalid route '{routing_key}' from {self.name}. Using default.")
                 return self.default_route
             
             return routing_key
             
         except Exception as e:
-            print(f"❌ Validation error in {self.name}: {e}")
+            logger.error(f"Validation error in {self.name}: {e}")
             return "error"
     
     async def post_async(self, shared: Dict[str, Any], prep_res: Any, routing_key: str) -> str:
@@ -83,7 +86,7 @@ class ValidationNode(AuditedAsyncNode):
         
         return routing_key
     
-    def validate(self, input_data: Any) -> str:
+    async def validate(self, input_data: Any) -> str:
         """
         User-defined validation logic.
         
@@ -151,7 +154,7 @@ class RoutingNode(AuditedAsyncNode):
             routing_key = self.route(input_data)
             return routing_key
         except Exception as e:
-            print(f"❌ Routing error in {self.name}: {e}")
+            logger.error(f"Routing error in {self.name}: {e}")
             return "error"
     
     async def post_async(self, shared: Dict[str, Any], prep_res: Any, routing_key: str) -> str:
@@ -221,7 +224,7 @@ class TransformNode(AuditedAsyncNode):
         try:
             return self.transform(input_data)
         except Exception as e:
-            print(f"❌ Transform error in {self.name}: {e}")
+            logger.error(f"Transform error in {self.name}: {e}")
             return input_data  # Return original on error
     
     async def post_async(self, shared: Dict[str, Any], _, transformed_data: Any) -> str:
