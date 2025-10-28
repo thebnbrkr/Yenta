@@ -3,7 +3,7 @@ requires = ["setuptools", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "yenta2"
+name = "yenta"
 version = "0.1.0"
 description = "Spec-driven MCP testing and auditing framework"
 authors = [
