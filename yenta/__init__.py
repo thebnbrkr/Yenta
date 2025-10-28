@@ -1,15 +1,9 @@
-import json, yaml, time, asyncio
+import json, yaml, time, asyncio  # ADD yaml HERE!
 from pathlib import Path
 from pydantic import ValidationError
 from agora.telemetry import AuditedAsyncNode, AuditedAsyncBatchNode
 from .schemas import SCHEMA_REGISTRY
-from .registry import JsonRegistry as MockRegistry
-from .models import TestRun, TestResult
-from .schema_validation import validate_spec_file
-from .logging_config import get_logger
-from .retry_logic import retry_async, STANDARD_RETRY
-
-logger = get_logger("core")
+from .mocks import MockRegistry
 
 try:
     from fastmcp import Client
@@ -69,9 +63,11 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         else:
             raise ValueError("spec must include mcp_server or mcp_servers")
 
+        # Get global flags
         global_use_mocks = spec.get("use_mocks", False)
         global_record_mocks = spec.get("record_mocks", False)
 
+        # Pass global flags WITH each test pair
         return [{
             "server_path": s, 
             "test": t,
@@ -85,24 +81,30 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
         name, tool, args = test_case["name"], test_case["tool"], test_case.get("arguments", {})
         timeout = int(test_case.get("timeout_sec", 45))
 
+        # Determine if we should use mocks (per-test overrides global)
         use_mocks = test_case.get("use_mocks", pair.get("global_use_mocks", False))
         record_mocks = test_case.get("record_mocks", pair.get("global_record_mocks", False))
         
-        mode = "real"
+        mode = "real"  # Can be: mock, replay, recorded, real
+        
+        # --- MOCKING LOGIC ---
         start = time.time()
         
+        # 1. Inline mock (highest priority)
         if use_mocks and "mock" in test_case:
             print(f"  [mocked] {name} ...")
             resp = test_case["mock"]
             latency_ms = 0.0
             mode = "mock"
         
+        # 2. Replay from registry
         elif use_mocks and self.mock_registry.has_mock(tool, args):
             print(f"  [replayed] {name} ...")
             resp = self.mock_registry.get(tool, args)
             latency_ms = 0.0
             mode = "replay"
         
+        # 3. Real MCP call
         else:
             if not FASTMCP_AVAILABLE:
                 return {
@@ -112,23 +114,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                     "arguments": args,
                     "status": "FAIL",
                     "response": {"error": "FastMCP not installed"},
-                    "failures": ["FastMCP not available. Check installation."],
-                    "metrics": {"latency_ms": 0},
-                    "mode": "error",
-                    "expected": {},
-                }
-
-            # Check if server file exists
-            server_path_obj = Path(server_path)
-            if not server_path_obj.exists():
-                return {
-                    "server": server_path,
-                    "test_name": name,
-                    "tool": tool,
-                    "arguments": args,
-                    "status": "FAIL",
-                    "response": {"error": f"MCP server file not found: {server_path}"},
-                    "failures": [f"Check that the server file exists at: {server_path}"],
+                    "failures": ["pip install fastmcp"],
                     "metrics": {"latency_ms": 0},
                     "mode": "error",
                     "expected": {},
@@ -138,40 +124,36 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
             print(f"  [{mode_label}] Running [{Path(server_path).name}] :: {name} ...")
             
             try:
-                # Define the MCP call function for retry logic
-                async def call_mcp_tool():
-                    async with Client(server_path) as client:
-                        return await asyncio.wait_for(
-                            client.call_tool(tool, args),
-                            timeout=timeout
-                        )
-                
-                # Execute with retry logic
-                result = await retry_async(call_mcp_tool, config=STANDARD_RETRY)
-                latency_ms = (time.time() - start) * 1000.0
-                
-                if hasattr(result, 'content') and result.content:
-                    content = result.content[0]
-                    resp = {"result": content.text if hasattr(content, 'text') else str(content)}
-                else:
-                    resp = {"result": str(result)}
-                
-                mode = "recorded" if record_mocks else "real"
-                
-                if record_mocks:
-                    self.mock_registry.record(tool, args, resp)
+                async with Client(server_path) as client:
+                    result = await asyncio.wait_for(
+                        client.call_tool(tool, args),
+                        timeout=timeout
+                    )
+                    latency_ms = (time.time() - start) * 1000.0
                     
+                    # Extract text from MCP response
+                    if hasattr(result, 'content') and result.content:
+                        content = result.content[0]
+                        resp = {"result": content.text if hasattr(content, 'text') else str(content)}
+                    else:
+                        resp = {"result": str(result)}
+                    
+                    mode = "recorded" if record_mocks else "real"
+                    
+                    # Record if requested
+                    if record_mocks:
+                        self.mock_registry.record(tool, args, resp)
+                        
             except asyncio.TimeoutError:
                 latency_ms = (time.time() - start) * 1000.0
-                resp = {"error": f"Timeout after {timeout}s (retries exhausted)"}
+                resp = {"error": f"Timeout after {timeout}s"}
                 mode = "error"
-                logger.error(f"Timeout error for {tool} after retries: {server_path}")
             except Exception as e:
                 latency_ms = (time.time() - start) * 1000.0
-                resp = {"error": f"{type(e).__name__}: {str(e)} (retries exhausted)"}
+                resp = {"error": f"{type(e).__name__}: {str(e)}"}
                 mode = "error"
-                logger.error(f"Error for {tool} after retries: {e}")
 
+        # --- VALIDATION LOGIC (same for mocks and real calls) ---
         status = "PASS" if "error" not in resp else "FAIL"
         failures = []
         details = {"latency_ms": round(latency_ms, 2)}
@@ -187,10 +169,11 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
                 except ValidationError as e:
                     status, failures = "FAIL", [f"Schema validation failed: {e}"]
 
+        # Keyword checks (CASE-INSENSITIVE)
         keywords = test_case.get("expected_keywords", [])
         if status == "PASS" and keywords:
-            jam = json.dumps(resp, ensure_ascii=False).lower()
-            missing = [k for k in keywords if k.lower() not in jam]
+            jam = json.dumps(resp, ensure_ascii=False).lower()  # Convert to lowercase
+            missing = [k for k in keywords if k.lower() not in jam]  # Compare lowercase
             if missing:
                 status, failures = "FAIL", [f"Missing keywords: {missing}"]
 
@@ -209,7 +192,7 @@ class RunMCPTestsNode(AuditedAsyncBatchNode):
             "response": resp,
             "failures": failures,
             "metrics": details,
-            "mode": mode,
+            "mode": mode,  # NEW: Track whether this was mocked/replayed/recorded/real
             "expected": {"schema": schema_name, "keywords": keywords, "metrics": metrics},
         }
 
@@ -263,7 +246,7 @@ class GenerateReportNode(AuditedAsyncNode):
             lines += [f"\nServer: {s}", f"Summary: {passed}/{total} passed"]
             for r in block:
                 icon = "✅" if r["status"] == "PASS" else "❌"
-                mode_badge = f"[{r.get('mode', 'real')}]"
+                mode_badge = f"[{r.get('mode', 'real')}]"  # NEW: Show mode
                 lines.append(f"\n{icon} {r['test_name']} {mode_badge}  [{r['metrics'].get('latency_ms','?')} ms]")
                 if r["failures"]:
                     for f in r["failures"]:

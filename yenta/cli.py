@@ -2,22 +2,19 @@ import asyncio
 import typer
 import yaml
 import tempfile
-import sys
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional
 from rich.console import Console
 from rich.table import Table
 from rich import print as rprint
 
 from agora.telemetry import AuditLogger
 from yenta.flow import MCPTestFlow
-from yenta.workflow_flow import MCPWorkflowFlow
-#from yenta.registry import JsonRegistry
-from yenta.registry import get_shared_registry
+from yenta.mocks import MockRegistry
 
 app = typer.Typer(
     name="yenta",
-    help=" Yenta - MCP Testing & Workflow Orchestration Framework",
+    help="🎭 Yenta - MCP Testing Framework with Record/Replay",
     add_completion=False
 )
 console = Console()
@@ -70,125 +67,12 @@ async def _run_flow(spec_file: Path, session_id: Optional[str] = None, override_
             Path(tmp_path).unlink(missing_ok=True)
 
 
-async def _run_workflow(
-    workflow_file: Path, 
-    session_id: Optional[str] = None,
-    input_data: Optional[Dict[str, Any]] = None,
-    debug: bool = False
-):
-    """Internal helper to run workflow orchestration"""
-    
-    if not workflow_file.exists():
-        rprint(f"[red]❌ Workflow file not found: {workflow_file}[/red]")
-        raise typer.Exit(1)
-    
-    # Load workflow YAML
-    with open(workflow_file) as f:
-        spec = yaml.safe_load(f)
-    
-    # Extract required fields
-    workflow_name = spec.get("workflow_name", workflow_file.stem)
-    server_path = spec.get("mcp_server")
-    workflow_lines = spec.get("workflow", [])
-    initial_input = spec.get("initial_input", {})
-    custom_nodes_file = spec.get("custom_nodes")  # ✨ FIX 1: Extract custom_nodes
-    
-    # Merge CLI input with YAML input
-    if input_data:
-        initial_input.update(input_data)
-    
-    if not server_path:
-        rprint("[red]❌ Missing 'mcp_server' in workflow YAML[/red]")
-        raise typer.Exit(1)
-    
-    if not workflow_lines:
-        rprint("[red]❌ Missing 'workflow' in workflow YAML[/red]")
-        raise typer.Exit(1)
-    
-    # Create logger and flow
-    logger = AuditLogger(session_id=session_id or f"workflow-{workflow_name}")
-    
-    try:
-        flow = MCPWorkflowFlow(
-            workflow_name=workflow_name,
-            server_path=server_path,
-            workflow_spec=workflow_lines,
-            logger=logger,
-            initial_input=initial_input,
-            custom_nodes_file=custom_nodes_file  # ✨ FIX 1: Pass custom_nodes
-        )
-        
-        # Run workflow
-        rprint(f"\n🔄 [bold cyan]Running workflow:[/bold cyan] {workflow_name}\n")
-        result = await flow.run_async()
-        
-        # Print results
-        rprint("\n" + "=" * 70)
-        rprint("✅ [bold green]WORKFLOW COMPLETED[/bold green]")
-        rprint("=" * 70)
-        
-        # Show outputs from each node
-        import json
-        rprint("\n[bold]Node Outputs:[/bold]")
-        for key, value in result.items():
-            if key.endswith("_output"):
-                node_name = key.replace("_output", "")
-                rprint(f"\n[cyan]{node_name}:[/cyan]")
-                
-                # Handle FastMCP response objects
-                if hasattr(value, '__dict__'):
-                    rprint(f"  Type: {type(value).__name__}")
-                    if hasattr(value, 'content') and value.content:
-                        rprint(f"  Content: {str(value.content)[:500]}")
-                    elif hasattr(value, 'model_dump'):
-                        try:
-                            rprint(f"  {json.dumps(value.model_dump(), indent=2, default=str)[:500]}")
-                        except:
-                            rprint(f"  {str(value)[:500]}")
-                    else:
-                        rprint(f"  {str(value)[:500]}")
-                else:
-                    try:
-                        rprint(f"  {json.dumps(value, indent=2, default=str)[:500]}")
-                    except:
-                        rprint(f"  {str(value)[:500]}")
-        
-        # Print telemetry summary
-        rprint("\n" + "=" * 70)
-        rprint("📊 [bold cyan]TELEMETRY SUMMARY[/bold cyan]")
-        rprint("=" * 70)
-        summary = logger.get_summary()
-        rprint(f"Session ID: {summary['session_id']}")
-        rprint(f"Total Events: {summary['total_events']}")
-        rprint(f"Duration: {summary.get('duration_seconds', 0):.2f}s")
-        
-        rprint("\n[bold]Event Breakdown:[/bold]")
-        for event, count in summary['event_counts'].items():
-            rprint(f"  {event}: {count}")
-        
-        return result
-        
-    except Exception as e:
-        # ✨ FIX 3: Better error messages
-        rprint(f"\n[red]❌ Workflow failed: {e}[/red]")
-        
-        if debug or "--debug" in sys.argv:
-            import traceback
-            rprint("\n[dim]Full traceback:[/dim]")
-            traceback.print_exc()
-        else:
-            rprint("[dim]Run with --debug for full traceback[/dim]")
-        
-        raise typer.Exit(1)
-
-
 @app.command()
 def run(
     spec_file: str = typer.Argument(..., help="YAML spec file to run"),
     session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID"),
     record: bool = typer.Option(False, "--record", "-r", help="Enable recording mode"),
-    replay: bool = typer.Option(False, "--replay", "-p", help="Enable replay mode (use mocks)"),
-    debug: bool = typer.Option(False, "--debug", "-d", help="Show full error tracebacks")
+    replay: bool = typer.Option(False, "--replay", "-p", help="Enable replay mode (use mocks)")
 ):
     """🚀 Run MCP tests from a YAML spec"""
     
@@ -213,54 +97,16 @@ def run(
     try:
         asyncio.run(_run_flow(spec_path, session_id, override))
         if record:
-            rprint(f"\n[green]✅ Recordings saved to data/mocks/[/green]")
+            rprint(f"\n[green]✅ Recordings saved to mocks.json[/green]")
     except Exception as e:
         rprint(f"[red]❌ Test run failed: {e}[/red]")
-        
-        if debug:
-            import traceback
-            rprint("\n[dim]Full traceback:[/dim]")
-            traceback.print_exc()
-        else:
-            rprint("[dim]Run with --debug for full traceback[/dim]")
-        
         raise typer.Exit(1)
-
-
-@app.command()
-def workflow(
-    workflow_file: str = typer.Argument(..., help="Workflow YAML file to run"),
-    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID"),
-    input: Optional[str] = typer.Option(None, "--input", "-i", help="Initial input as JSON string"),
-    debug: bool = typer.Option(False, "--debug", "-d", help="Show full error tracebacks")
-):
-    """🔗 Run MCP workflow orchestration"""
-    
-    workflow_path = Path(workflow_file)
-    
-    # Parse input JSON if provided
-    input_data = None
-    if input:
-        import json
-        try:
-            input_data = json.loads(input)
-        except json.JSONDecodeError as e:
-            rprint(f"[red]❌ Invalid JSON input: {e}[/red]")
-            raise typer.Exit(1)
-    
-    try:
-        asyncio.run(_run_workflow(workflow_path, session_id, input_data, debug))
-    except Exception as e:
-        if not isinstance(e, typer.Exit):
-            rprint(f"[red]❌ Workflow execution failed: {e}[/red]")
-            raise typer.Exit(1)
 
 
 @app.command()
 def record(
     spec_file: str = typer.Argument(..., help="YAML spec file to record"),
-    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID"),
-    debug: bool = typer.Option(False, "--debug", "-d", help="Show full error tracebacks")
+    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID")
 ):
     """📝 Record MCP calls for future replay"""
     
@@ -276,25 +122,16 @@ def record(
     
     try:
         asyncio.run(_run_flow(spec_path, session_id, override))
-        rprint(f"\n[green]✅ Recordings saved to data/mocks/[/green]")
+        rprint(f"\n[green]✅ Recordings saved to mocks.json[/green]")
     except Exception as e:
         rprint(f"[red]❌ Recording failed: {e}[/red]")
-        
-        if debug:
-            import traceback
-            rprint("\n[dim]Full traceback:[/dim]")
-            traceback.print_exc()
-        else:
-            rprint("[dim]Run with --debug for full traceback[/dim]")
-        
         raise typer.Exit(1)
 
 
 @app.command()
 def replay(
     spec_file: str = typer.Argument(..., help="YAML spec file to replay"),
-    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID"),
-    debug: bool = typer.Option(False, "--debug", "-d", help="Show full error tracebacks")
+    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID")
 ):
     """🔄 Replay tests using recorded mocks"""
     
@@ -305,10 +142,9 @@ def replay(
         rprint(f"[red]❌ Spec file not found: {spec_file}[/red]")
         raise typer.Exit(1)
     
-    registry = get_shared_registry()
-    stats = registry.get_stats()
-    if stats["total_mocks"] == 0:
-        rprint("[yellow]⚠️  No mocks found. Run 'yenta record' first.[/yellow]")
+    registry = MockRegistry()
+    if not registry.mock_file.exists():
+        rprint("[yellow]⚠️  No mocks.json found. Run 'yenta record' first.[/yellow]")
     
     # Override: use_mocks=true, record_mocks=false
     override = {"use_mocks": True, "record_mocks": False}
@@ -317,116 +153,67 @@ def replay(
         asyncio.run(_run_flow(spec_path, session_id, override))
     except Exception as e:
         rprint(f"[red]❌ Replay failed: {e}[/red]")
-        
-        if debug:
-            import traceback
-            rprint("\n[dim]Full traceback:[/dim]")
-            traceback.print_exc()
-        else:
-            rprint("[dim]Run with --debug for full traceback[/dim]")
-        
         raise typer.Exit(1)
 
 
 @app.command()
 def status():
-    """📊 Show registry status"""
+    """📊 Show recording status and statistics"""
     
-    registry = get_shared_registry()
-    stats = registry.get_stats()
+    registry = MockRegistry()
     
-    table = Table(title="🎭 Yenta Registry Status")
+    table = Table(title="🎭 Yenta Mock Registry Status")
     table.add_column("Metric", style="cyan")
     table.add_column("Value", style="green")
     
-    table.add_row("Data Directory", stats["data_dir"])
-    table.add_row("Total Mocks", str(stats["total_mocks"]))
-    table.add_row("  ├─ Tools", str(stats["tools"]))
-    table.add_row("  ├─ Resources", str(stats["resources"]))
-    table.add_row("  └─ Prompts", str(stats["prompts"]))
-    table.add_row("Total Runs", str(stats["total_runs"]))
-    
-    if stats["total_mocks"] > 0:
-        table.add_row("Status", "✅ Ready for replay")
-    else:
-        table.add_row("Status", "No recordings yet")
-    
-    console.print(table)
-    
-    # Show recorded tools
-    if stats["total_mocks"] > 0:
-        rprint("\n[bold]Recorded Tools:[/bold]")
-        mocks = registry.list_mocks()
-        tools = set(m.name for m in mocks)
-        for tool in sorted(tools):
-            rprint(f"  • {tool}")
-
-
-@app.command()
-def history(
-    limit: int = typer.Option(10, "--limit", "-n", help="Number of runs to show")
-):
-    """📜 Show test run history"""
-    
-    registry = get_shared_registry()
-    runs = registry.list_runs(limit=limit)
-    
-    if not runs:
-        rprint("[yellow]No test runs found[/yellow]")
-        return
-    
-    table = Table(title=f"📜 Recent Test Runs (last {len(runs)})")
-    table.add_column("Timestamp", style="cyan")
-    table.add_column("Spec", style="green")
-    table.add_column("Status", style="yellow")
-    table.add_column("Duration", style="magenta")
-    table.add_column("Pass/Total", style="blue")
-    
-    for run in runs:
-        passed = sum(1 for r in run.results if r.status == "PASS")
-        total = len(run.results)
-        status_icon = "✅" if run.status == "completed" else "❌"
+    if registry.mock_file.exists():
+        num_mocks = len(registry.mocks)
+        file_size = registry.mock_file.stat().st_size
         
-        table.add_row(
-            run.timestamp.strftime("%Y-%m-%d %H:%M:%S"),
-            run.spec_name,
-            f"{status_icon} {run.status}",
-            f"{run.duration_ms:.0f}ms",
-            f"{passed}/{total}"
-        )
+        table.add_row("Mock File", str(registry.mock_file))
+        table.add_row("Total Recordings", str(num_mocks))
+        table.add_row("File Size", f"{file_size:,} bytes")
+        table.add_row("Status", "✅ Ready for replay")
+        
+        if num_mocks > 0:
+            rprint("\n[bold]Recorded Tools:[/bold]")
+            tools = set()
+            for key in registry.mocks.keys():
+                import json
+                try:
+                    data = json.loads(key)
+                    tools.add(data.get("tool", "unknown"))
+                except:
+                    pass
+            for tool in sorted(tools):
+                rprint(f"  • {tool}")
+    else:
+        table.add_row("Mock File", "❌ Not found")
+        table.add_row("Status", "No recordings yet")
+        table.add_row("Next Step", "Run 'yenta record <spec.yaml>'")
     
     console.print(table)
 
 
 @app.command()
 def clear(
-    category: Optional[str] = typer.Option(None, "--category", "-c", help="Clear specific category (tools/resources/prompts)"),
     confirm: bool = typer.Option(False, "--yes", "-y", help="Skip confirmation"),
 ):
-    """🧹 Clear recorded mocks"""
+    """🧹 Clear all recorded mocks"""
     
-    registry = get_shared_registry()
-    stats = registry.get_stats()
+    registry = MockRegistry()
     
-    if stats["total_mocks"] == 0:
-        rprint("[yellow]ℹ️  No mocks found. Nothing to clear.[/yellow]")
+    if not registry.mock_file.exists():
+        rprint("[yellow]ℹ️  No mocks.json file found. Nothing to clear.[/yellow]")
         return
     
-    if category:
-        count = stats.get(category, 0)
-        if count == 0:
-            rprint(f"[yellow]ℹ️  No {category} mocks found.[/yellow]")
-            return
-        if not confirm:
-            rprint(f"⚠️  This will delete [bold]{count}[/bold] {category} mock(s).")
-            confirm = typer.confirm("Are you sure?")
-    else:
-        if not confirm:
-            rprint(f"⚠️  This will delete [bold]{stats['total_mocks']}[/bold] total mock(s).")
-            confirm = typer.confirm("Are you sure?")
+    if not confirm:
+        num_mocks = len(registry.mocks)
+        rprint(f"⚠️  This will delete [bold]{num_mocks}[/bold] recorded mock(s).")
+        confirm = typer.confirm("Are you sure?")
     
     if confirm:
-        registry.clear_mocks(category)
+        registry.mock_file.unlink()
         rprint("[green]✅ Mocks cleared successfully[/green]")
     else:
         rprint("[yellow]Cancelled[/yellow]")
@@ -434,35 +221,40 @@ def clear(
 
 @app.command()
 def inspect(
-    tool: Optional[str] = typer.Option(None, "--tool", "-t", help="Filter by tool name"),
-    category: Optional[str] = typer.Option(None, "--category", "-c", help="Filter by category (tools/resources/prompts)")
+    tool: Optional[str] = typer.Option(None, "--tool", "-t", help="Filter by tool name")
 ):
     """🔍 Inspect recorded mocks"""
     
-    registry = get_shared_registry()
-    mocks = registry.list_mocks(category=category)
+    registry = MockRegistry()
     
-    if not mocks:
-        rprint("[yellow]❌ No mocks found[/yellow]")
+    if not registry.mock_file.exists():
+        rprint("[yellow]❌ No mocks.json found[/yellow]")
         return
     
-    # Filter by tool if specified
-    if tool:
-        mocks = [m for m in mocks if m.name == tool]
-        if not mocks:
-            rprint(f"[yellow]❌ No mocks found for tool '{tool}'[/yellow]")
-            return
+    if not registry.mocks:
+        rprint("[yellow]ℹ️  mocks.json is empty[/yellow]")
+        return
     
     import json
     
-    rprint(f"\n[bold cyan]📋 Recorded Mocks ({len(mocks)} total)[/bold cyan]\n")
+    rprint(f"\n[bold cyan]📋 Recorded Mocks ({len(registry.mocks)} total)[/bold cyan]\n")
     
-    for i, mock in enumerate(mocks, 1):
-        rprint(f"[bold]{i}. {mock.name}[/bold] [dim]({mock.category})[/dim]")
-        rprint(f"   Args: {mock.arguments}")
-        rprint(f"   Response: {json.dumps(mock.response, indent=2)[:200]}...")
-        rprint(f"   Recorded: {mock.recorded_at.strftime('%Y-%m-%d %H:%M:%S')}")
-        rprint()
+    for i, (key, response) in enumerate(registry.mocks.items(), 1):
+        try:
+            data = json.loads(key)
+            tool_name = data.get("tool", "unknown")
+            args = data.get("args", {})
+            
+            # Filter by tool if specified
+            if tool and tool_name != tool:
+                continue
+            
+            rprint(f"[bold]{i}. {tool_name}[/bold]")
+            rprint(f"   Args: {args}")
+            rprint(f"   Response: {json.dumps(response, indent=2)[:200]}...")
+            rprint()
+        except:
+            rprint(f"[red]{i}. Invalid mock entry[/red]")
 
 
 if __name__ == "__main__":
