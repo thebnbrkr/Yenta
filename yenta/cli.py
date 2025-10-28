@@ -187,7 +187,8 @@ def run(
     spec_file: str = typer.Argument(..., help="YAML spec file to run"),
     session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID"),
     record: bool = typer.Option(False, "--record", "-r", help="Enable recording mode"),
-    replay: bool = typer.Option(False, "--replay", "-p", help="Enable replay mode (use mocks)")
+    replay: bool = typer.Option(False, "--replay", "-p", help="Enable replay mode (use mocks)"),
+    debug: bool = typer.Option(False, "--debug", "-d", help="Show full error tracebacks")
 ):
     """🚀 Run MCP tests from a YAML spec"""
     
@@ -215,6 +216,14 @@ def run(
             rprint(f"\n[green]✅ Recordings saved to data/mocks/[/green]")
     except Exception as e:
         rprint(f"[red]❌ Test run failed: {e}[/red]")
+        
+        if debug:
+            import traceback
+            rprint("\n[dim]Full traceback:[/dim]")
+            traceback.print_exc()
+        else:
+            rprint("[dim]Run with --debug for full traceback[/dim]")
+        
         raise typer.Exit(1)
 
 
@@ -250,7 +259,8 @@ def workflow(
 @app.command()
 def record(
     spec_file: str = typer.Argument(..., help="YAML spec file to record"),
-    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID")
+    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID"),
+    debug: bool = typer.Option(False, "--debug", "-d", help="Show full error tracebacks")
 ):
     """📝 Record MCP calls for future replay"""
     
@@ -269,13 +279,22 @@ def record(
         rprint(f"\n[green]✅ Recordings saved to data/mocks/[/green]")
     except Exception as e:
         rprint(f"[red]❌ Recording failed: {e}[/red]")
+        
+        if debug:
+            import traceback
+            rprint("\n[dim]Full traceback:[/dim]")
+            traceback.print_exc()
+        else:
+            rprint("[dim]Run with --debug for full traceback[/dim]")
+        
         raise typer.Exit(1)
 
 
 @app.command()
 def replay(
     spec_file: str = typer.Argument(..., help="YAML spec file to replay"),
-    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID")
+    session_id: Optional[str] = typer.Option(None, "--session", "-s", help="Custom session ID"),
+    debug: bool = typer.Option(False, "--debug", "-d", help="Show full error tracebacks")
 ):
     """🔄 Replay tests using recorded mocks"""
     
@@ -298,6 +317,14 @@ def replay(
         asyncio.run(_run_flow(spec_path, session_id, override))
     except Exception as e:
         rprint(f"[red]❌ Replay failed: {e}[/red]")
+        
+        if debug:
+            import traceback
+            rprint("\n[dim]Full traceback:[/dim]")
+            traceback.print_exc()
+        else:
+            rprint("[dim]Run with --debug for full traceback[/dim]")
+        
         raise typer.Exit(1)
 
 
